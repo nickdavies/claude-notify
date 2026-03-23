@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::mcp;
 use config::{NotifyConfig, NotifyConfigUpdate, ServerConfig, SharedNotifyConfig};
+use hooks::PendingNotifications;
 use presence::{Presence, PresenceUpdate};
 use pushover::PushoverClient;
 use sessions::{SessionConfigUpdate, SessionRegistry};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub sessions: Arc<SessionRegistry>,
     pub pushover: Arc<PushoverClient>,
     pub notify_config: SharedNotifyConfig,
+    pub pending: Arc<PendingNotifications>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -114,13 +116,15 @@ impl AppState {
         );
         let presence = Presence::new(server_config.presence_ttl_secs);
         let sessions = SessionRegistry::new(server_config.session_ttl_secs);
+        let notify_config = NotifyConfig::with_delay(server_config.notification_delay_secs);
 
         Self {
             config: Arc::new(server_config),
             presence: Arc::new(presence),
             sessions: Arc::new(sessions),
             pushover: Arc::new(pushover),
-            notify_config: Arc::new(RwLock::new(NotifyConfig::default())),
+            notify_config: Arc::new(RwLock::new(notify_config)),
+            pending: Arc::new(PendingNotifications::new()),
         }
     }
 }

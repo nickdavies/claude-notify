@@ -44,6 +44,7 @@ Single binary (`claude-notify serve`), single process. REST API and MCP protocol
 | `LISTEN_ADDR` | no | `0.0.0.0:8080` | Bind address |
 | `PRESENCE_TTL` | no | `120` | Seconds before presence degrades to `away` |
 | `SESSION_TTL` | no | `7200` | Seconds before idle sessions are evicted |
+| `NOTIFICATION_DELAY` | no | `0` | Seconds to wait before sending permission notifications (0 = immediate) |
 
 ### Run locally
 
@@ -221,3 +222,27 @@ A notification fires only when all three conditions are true:
 3. The notification type is enabled for that session (`PUT /sessions/{id}`)
 
 Both global and per-session config default to all notifications enabled.
+
+## Notification delay
+
+Permission notifications can be delayed to avoid notifying you about prompts you answer quickly. Set `NOTIFICATION_DELAY=30` to wait 30 seconds before sending. If the session ends, stops, or a new permission prompt arrives for the same session during the delay, the pending notification is cancelled.
+
+This is useful when you don't have presence detection set up yet — without it, every permission prompt sends immediately even when you're at your desk.
+
+The delay is configurable at runtime via `PUT /config`:
+
+```sh
+# Enable 30 second delay
+curl -X PUT https://your-server/config \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"notification_delay_secs": 30}'
+
+# Disable delay (send immediately)
+curl -X PUT https://your-server/config \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"notification_delay_secs": 0}'
+```
+
+Stop notifications are always sent immediately — the delay only applies to permission prompts.
