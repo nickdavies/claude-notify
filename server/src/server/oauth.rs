@@ -32,10 +32,17 @@ pub struct OidcProvider {
     pub client: ProviderClient,
 }
 
-/// Manages all configured OIDC providers.
+/// Basic auth credentials for development/testing.
+pub struct BasicAuthCreds {
+    pub user: String,
+    pub password: String,
+}
+
+/// Manages all configured auth providers (OIDC + optional basic auth).
 pub struct OAuthManager {
     pub providers: Vec<OidcProvider>,
     pub allowed_emails: Vec<EmailPattern>,
+    pub basic_auth: Option<BasicAuthCreds>,
 }
 
 /// Email pattern for allowlist: exact match or domain wildcard (*@domain.com).
@@ -102,7 +109,16 @@ impl OAuthManager {
             info!("OAuth: Custom OIDC configured");
         }
 
-        if providers.is_empty() {
+        // Basic auth (for development/testing only)
+        let basic_auth =
+            if let (Ok(user), Ok(password)) = (env::var("BASIC_AUTH_USER"), env::var("BASIC_AUTH_PASSWORD")) {
+                warn!("Basic auth enabled — do NOT use in production");
+                Some(BasicAuthCreds { user, password })
+            } else {
+                None
+            };
+
+        if providers.is_empty() && basic_auth.is_none() {
             return Ok(None);
         }
 
@@ -117,6 +133,7 @@ impl OAuthManager {
         Ok(Some(Self {
             providers,
             allowed_emails,
+            basic_auth,
         }))
     }
 
@@ -133,6 +150,16 @@ impl OAuthManager {
 
     pub fn provider_names(&self) -> Vec<&str> {
         self.providers.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    pub fn has_basic_auth(&self) -> bool {
+        self.basic_auth.is_some()
+    }
+
+    pub fn check_basic_auth(&self, user: &str, password: &str) -> bool {
+        self.basic_auth
+            .as_ref()
+            .is_some_and(|c| c.user == user && c.password == password)
     }
 }
 
@@ -326,6 +353,11 @@ pub async fn logout(session: Session) -> Response {
 /// Extract authenticated email from session. Returns None if not logged in.
 pub async fn get_session_email(session: &Session) -> Option<String> {
     session.get::<String>(SESSION_EMAIL_KEY).await.ok().flatten()
+}
+
+/// Store authenticated email in session.
+pub async fn set_session_email(session: &Session, email: &str) -> Result<(), tower_sessions::session::Error> {
+    session.insert(SESSION_EMAIL_KEY, email).await
 }
 
 #[cfg(test)]

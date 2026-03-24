@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -20,6 +20,7 @@ use super::AppState;
 #[template(path = "login.html")]
 struct LoginTemplate {
     providers: Vec<String>,
+    has_basic_auth: bool,
 }
 
 #[derive(Template)]
@@ -44,12 +45,47 @@ struct ApprovalDetailTemplate {
 
 /// GET /auth/login
 pub async fn login_page<N: Notifier>(State(state): State<AppState<N>>) -> Response {
-    let providers = match &*state.oauth {
-        Some(mgr) => mgr.provider_names().into_iter().map(String::from).collect(),
-        None => vec![],
+    let (providers, has_basic_auth) = match &*state.oauth {
+        Some(mgr) => (
+            mgr.provider_names().into_iter().map(String::from).collect(),
+            mgr.has_basic_auth(),
+        ),
+        None => (vec![], false),
     };
-    let template = LoginTemplate { providers };
-    into_html_response(template)
+    into_html_response(LoginTemplate {
+        providers,
+        has_basic_auth,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct BasicAuthForm {
+    pub username: String,
+    pub password: String,
+}
+
+/// POST /auth/login/basic — basic auth form submission.
+pub async fn basic_auth_login<N: Notifier>(
+    State(state): State<AppState<N>>,
+    session: Session,
+    Form(form): Form<BasicAuthForm>,
+) -> Response {
+    let oauth = match &*state.oauth {
+        Some(mgr) => mgr,
+        None => return (StatusCode::NOT_FOUND, "Auth not configured").into_response(),
+    };
+
+    if !oauth.check_basic_auth(&form.username, &form.password) {
+        return Redirect::temporary("/auth/login?error=invalid").into_response();
+    }
+
+    // Use the username as the "email" for session identity
+    if let Err(e) = oauth::set_session_email(&session, &form.username).await {
+        tracing::error!("failed to store session: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Session error").into_response();
+    }
+
+    Redirect::temporary("/approvals").into_response()
 }
 
 /// GET /approvals — dashboard (auth enforced by middleware)

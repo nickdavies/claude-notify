@@ -134,7 +134,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
 
         if oauth.is_none() {
             anyhow::bail!(
-                "APPROVAL_MODE={:?} requires at least one OAuth provider (GOOGLE_CLIENT_ID/SECRET or OIDC_ISSUER_URL/CLIENT_ID/SECRET)",
+                "APPROVAL_MODE={:?} requires at least one auth provider (GOOGLE_CLIENT_ID/SECRET, OIDC_ISSUER_URL/CLIENT_ID/SECRET, or BASIC_AUTH_USER/PASSWORD)",
                 config.approval_mode
             );
         }

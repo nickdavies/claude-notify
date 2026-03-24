@@ -106,6 +106,7 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
         // Auth routes (public, no auth required)
         let auth_routes = Router::new()
             .route("/auth/login", get(web::login_page::<N>))
+            .route("/auth/login/basic", post(web::basic_auth_login::<N>))
             .route("/auth/start/{provider}", get(oauth::start_auth::<N>))
             .route("/auth/callback/{provider}", get(oauth::callback::<N>))
             .route("/auth/logout", post(oauth::logout))

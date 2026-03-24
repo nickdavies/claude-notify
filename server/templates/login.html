@@ -16,8 +16,20 @@
             Sign in with {{ provider }}
         </a>
         {% endfor %}
-        {% if providers.is_empty() %}
-        <p><em>No OAuth providers configured.</em></p>
+        {% if has_basic_auth %}
+        {% if !providers.is_empty() %}
+        <hr>
+        {% endif %}
+        <form method="post" action="/auth/login/basic">
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autocomplete="username">
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
+            <button type="submit">Sign in</button>
+        </form>
+        {% endif %}
+        {% if providers.is_empty() && !has_basic_auth %}
+        <p><em>No auth providers configured.</em></p>
         {% endif %}
     </article>
 </main>
