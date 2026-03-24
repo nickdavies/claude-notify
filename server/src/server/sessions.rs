@@ -16,15 +16,11 @@ pub struct SessionInner {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SessionApprovalMode {
+    #[default]
     Remote,
     Terminal,
-}
-
-impl Default for SessionApprovalMode {
-    fn default() -> Self {
-        Self::Remote
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

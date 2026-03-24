@@ -227,20 +227,20 @@ pub async fn approval<N: Notifier>(
         .await;
 
     // Send push notification with link if pending and base_url configured
-    if !approval.status.is_resolved() {
-        if let Some(base_url) = &state.config.base_url {
-            let url = format!("{}/approvals/{}", base_url, approval.id);
-            let notifier = Arc::clone(&state.notifier);
-            let title = "Claude Code (approval)".to_string();
-            let message = format!(
-                "[{project}] {} — {}",
-                req.tool_name,
-                truncate_input(&req.tool_input)
-            );
-            tokio::spawn(async move {
-                fire_and_forget(&*notifier, &title, &message, Some(&url)).await;
-            });
-        }
+    if !approval.status.is_resolved()
+        && let Some(base_url) = &state.config.base_url
+    {
+        let url = format!("{}/approvals/{}", base_url, approval.id);
+        let notifier = Arc::clone(&state.notifier);
+        let title = "Claude Code (approval)".to_string();
+        let message = format!(
+            "[{project}] {} — {}",
+            req.tool_name,
+            truncate_input(&req.tool_input)
+        );
+        tokio::spawn(async move {
+            fire_and_forget(&*notifier, &title, &message, Some(&url)).await;
+        });
     }
 
     Json(ApprovalResponse {

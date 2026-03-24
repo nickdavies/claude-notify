@@ -293,7 +293,7 @@ async fn handle_get_approval_mode<N: Notifier>(
         .sessions
         .get_config(&id)
         .await
-        .ok_or_else(|| AppError::SessionNotFound(id))?;
+        .ok_or(AppError::SessionNotFound(id))?;
     Ok(Json(ApprovalModeResponse {
         approval_mode: cfg.approval_mode,
     }))
