@@ -14,6 +14,7 @@ pub struct ServerConfig {
     pub listen_addr: String,
     pub presence_ttl_secs: u64,
     pub session_ttl_secs: u64,
+    pub notification_delay_secs: u64,
 }
 
 pub struct Token {
@@ -44,6 +45,10 @@ impl ServerConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(7200);
+        let notification_delay_secs = env::var("NOTIFICATION_DELAY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         Ok(Self {
             pushover_token,
@@ -52,6 +57,7 @@ impl ServerConfig {
             listen_addr,
             presence_ttl_secs,
             session_ttl_secs,
+            notification_delay_secs,
         })
     }
 }
@@ -86,13 +92,28 @@ fn parse_tokens(raw: &str) -> Result<Vec<Token>, AppError> {
 pub struct NotifyConfig {
     pub stop_enabled: bool,
     pub permission_enabled: bool,
+    /// Delay in seconds before sending permission notifications (0 = immediate).
+    pub notification_delay_secs: u64,
 }
 
-impl Default for NotifyConfig {
-    fn default() -> Self {
+impl NotifyConfig {
+    pub fn with_delay(delay_secs: u64) -> Self {
         Self {
             stop_enabled: true,
             permission_enabled: true,
+            notification_delay_secs: delay_secs,
+        }
+    }
+
+    pub fn apply(&mut self, update: NotifyConfigUpdate) {
+        if let Some(v) = update.stop_enabled {
+            self.stop_enabled = v;
+        }
+        if let Some(v) = update.permission_enabled {
+            self.permission_enabled = v;
+        }
+        if let Some(v) = update.notification_delay_secs {
+            self.notification_delay_secs = v;
         }
     }
 }
@@ -102,17 +123,7 @@ impl Default for NotifyConfig {
 pub struct NotifyConfigUpdate {
     pub stop_enabled: Option<bool>,
     pub permission_enabled: Option<bool>,
-}
-
-impl NotifyConfig {
-    pub fn apply(&mut self, update: NotifyConfigUpdate) {
-        if let Some(v) = update.stop_enabled {
-            self.stop_enabled = v;
-        }
-        if let Some(v) = update.permission_enabled {
-            self.permission_enabled = v;
-        }
-    }
+    pub notification_delay_secs: Option<u64>,
 }
 
 /// Shared mutable notify config.
@@ -147,12 +158,14 @@ mod tests {
 
     #[test]
     fn notify_config_partial_update() {
-        let mut cfg = NotifyConfig::default();
+        let mut cfg = NotifyConfig::with_delay(0);
         cfg.apply(NotifyConfigUpdate {
             stop_enabled: Some(false),
             permission_enabled: None,
+            notification_delay_secs: Some(30),
         });
         assert!(!cfg.stop_enabled);
         assert!(cfg.permission_enabled);
+        assert_eq!(cfg.notification_delay_secs, 30);
     }
 }

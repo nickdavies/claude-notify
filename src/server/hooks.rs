@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::Deserialize;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use super::AppState;
@@ -18,6 +22,45 @@ pub struct HookPayload {
     pub message: Option<String>,
 }
 
+/// Tracks pending delayed notifications so they can be cancelled.
+pub struct PendingNotifications {
+    pending: RwLock<HashMap<String, CancellationToken>>,
+}
+
+impl PendingNotifications {
+    pub fn new() -> Self {
+        Self {
+            pending: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register a cancellation token for a session. Cancels any existing pending notification.
+    async fn insert(&self, session_id: &str) -> CancellationToken {
+        let mut map = self.pending.write().await;
+        // Cancel any existing pending notification for this session
+        if let Some(old) = map.remove(session_id) {
+            old.cancel();
+        }
+        let token = CancellationToken::new();
+        map.insert(session_id.to_owned(), token.clone());
+        token
+    }
+
+    /// Cancel and remove a pending notification for a session.
+    pub async fn cancel(&self, session_id: &str) {
+        let mut map = self.pending.write().await;
+        if let Some(token) = map.remove(session_id) {
+            token.cancel();
+            info!(session_id, "pending notification cancelled");
+        }
+    }
+
+    /// Remove the token (called when the delayed notification fires successfully).
+    async fn remove(&self, session_id: &str) {
+        self.pending.write().await.remove(session_id);
+    }
+}
+
 /// POST /hooks/stop
 pub async fn stop(State(state): State<AppState>, Json(payload): Json<HookPayload>) -> StatusCode {
     let (session_id, cwd) = match extract_session(&payload) {
@@ -27,6 +70,9 @@ pub async fn stop(State(state): State<AppState>, Json(payload): Json<HookPayload
             return StatusCode::OK;
         }
     };
+
+    // Cancel any pending permission notification before sending the stop notification
+    state.pending.cancel(&session_id).await;
 
     let project = state.sessions.get_or_register(&session_id, &cwd).await;
     let session_cfg = state.sessions.get_config(&session_id).await;
@@ -52,7 +98,6 @@ pub async fn stop(State(state): State<AppState>, Json(payload): Json<HookPayload
         );
     }
 
-    // Deregister session on stop
     state.sessions.deregister(&session_id).await;
 
     StatusCode::OK
@@ -80,20 +125,38 @@ pub async fn notification(
         && global.permission_enabled
         && session_cfg.as_ref().is_some_and(|c| c.permission_enabled);
 
-    if should_notify {
-        let pushover = Arc::clone(&state.pushover);
-        let title = "Claude Code (waiting)".to_string();
-        let msg_body = payload.message.as_deref().unwrap_or("Permission prompt");
-        let message = format!("[{project}] {msg_body}");
-        tokio::spawn(async move {
-            fire_and_forget(&pushover, &title, &message).await;
-        });
-    } else {
+    if !should_notify {
         info!(
             session_id,
             present = ?presence,
             "notification hook: notification suppressed"
         );
+        return StatusCode::OK;
+    }
+
+    let pushover = Arc::clone(&state.pushover);
+    let title = "Claude Code (waiting)".to_string();
+    let msg_body = payload.message.as_deref().unwrap_or("Permission prompt");
+    let message = format!("[{project}] {msg_body}");
+    let delay_secs = global.notification_delay_secs;
+
+    if delay_secs == 0 {
+        tokio::spawn(async move {
+            fire_and_forget(&pushover, &title, &message).await;
+        });
+    } else {
+        let cancel = state.pending.insert(&session_id).await;
+        let pending = Arc::clone(&state.pending);
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = cancel.cancelled() => {}
+                () = tokio::time::sleep(Duration::from_secs(delay_secs)) => {
+                    fire_and_forget(&pushover, &title, &message).await;
+                    pending.remove(&sid).await;
+                }
+            }
+        });
     }
 
     StatusCode::OK
@@ -105,6 +168,7 @@ pub async fn session_end(
     Json(payload): Json<HookPayload>,
 ) -> StatusCode {
     if let Some(session_id) = &payload.session_id {
+        state.pending.cancel(session_id).await;
         state.sessions.deregister(session_id).await;
     }
     StatusCode::OK
