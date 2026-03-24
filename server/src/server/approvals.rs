@@ -214,13 +214,7 @@ impl ApprovalRegistry {
             let session_id = approval.session_id.clone();
 
             let (tx, _rx) = watch::channel(ApprovalStatus::Pending);
-            entries.insert(
-                id,
-                ApprovalEntry {
-                    approval,
-                    tx,
-                },
-            );
+            entries.insert(id, ApprovalEntry { approval, tx });
             by_req.insert(request_id, id);
             by_sess.insert(session_id, id);
             info!(approval_id = %id, "approval restored");

@@ -102,10 +102,7 @@ async fn run(args: &Args) -> Result<(), String> {
         .hook_event_name
         .as_deref()
         .ok_or("missing hook_event_name in payload")?;
-    let tool_name = payload
-        .tool_name
-        .as_deref()
-        .unwrap_or("unknown");
+    let tool_name = payload.tool_name.as_deref().unwrap_or("unknown");
     let tool_input = payload
         .tool_input
         .clone()
@@ -258,7 +255,10 @@ fn format_output(
         "PreToolUse" => {
             let (perm_decision, perm_reason) = match status_type {
                 "approved" => ("allow", message.unwrap_or("")),
-                "denied" => ("deny", reason.or(message).unwrap_or("denied via remote approval")),
+                "denied" => (
+                    "deny",
+                    reason.or(message).unwrap_or("denied via remote approval"),
+                ),
                 other => return Err(format!("unexpected approval status: {other}")),
             };
             let output = serde_json::json!({

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::error::AppError;
 use super::sessions::SessionApprovalMode;
+use crate::error::AppError;
 
 /// Feature mode for the approval system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +61,9 @@ impl ServerConfig {
             _ => ApprovalFeatureMode::Disabled,
         };
 
-        let base_url = env::var("BASE_URL").ok().map(|u| u.trim_end_matches('/').to_string());
+        let base_url = env::var("BASE_URL")
+            .ok()
+            .map(|u| u.trim_end_matches('/').to_string());
 
         if approval_mode != ApprovalFeatureMode::Disabled && base_url.is_none() {
             return Err(AppError::Config(

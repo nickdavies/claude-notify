@@ -1,19 +1,19 @@
 use askama::Template;
+use axum::Form;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Form;
 use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::warn;
 use uuid::Uuid;
 
+use super::AppState;
 use super::approvals::{Approval, ApprovalStatus};
 use super::config::ApprovalFeatureMode;
 use super::notifier::Notifier;
 use super::oauth;
 use super::sessions::SessionView;
-use super::AppState;
 
 const SESSION_CSRF_KEY: &str = "csrf_token";
 
@@ -240,9 +240,7 @@ pub async fn toggle_approval_mode<N: Notifier>(
 
 /// Extract email from session. Middleware guarantees this exists on authed routes.
 async fn session_email(session: &Session) -> String {
-    oauth::get_session_email(session)
-        .await
-        .unwrap_or_default()
+    oauth::get_session_email(session).await.unwrap_or_default()
 }
 
 fn into_html_response<T: Template>(template: T) -> Response {

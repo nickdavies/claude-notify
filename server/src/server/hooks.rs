@@ -232,7 +232,11 @@ pub async fn approval<N: Notifier>(
             let url = format!("{}/approvals/{}", base_url, approval.id);
             let notifier = Arc::clone(&state.notifier);
             let title = "Claude Code (approval)".to_string();
-            let message = format!("[{project}] {} — {}", req.tool_name, truncate_input(&req.tool_input));
+            let message = format!(
+                "[{project}] {} — {}",
+                req.tool_name,
+                truncate_input(&req.tool_input)
+            );
             tokio::spawn(async move {
                 fire_and_forget(&*notifier, &title, &message, Some(&url)).await;
             });

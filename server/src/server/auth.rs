@@ -18,7 +18,11 @@ pub async fn require_auth<N: Notifier>(
     next: Next,
 ) -> Result<Response, StatusCode> {
     // Try Bearer token first
-    if let Some(header) = request.headers().get("authorization").and_then(|v| v.to_str().ok()) {
+    if let Some(header) = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+    {
         // If Authorization header is present, it must be valid
         let token = header
             .strip_prefix("Bearer ")

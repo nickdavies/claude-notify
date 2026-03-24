@@ -25,7 +25,9 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::mcp;
 use approvals::{ApprovalRegistry, ApprovalStatus};
-use config::{ApprovalFeatureMode, NotifyConfig, NotifyConfigUpdate, ServerConfig, SharedNotifyConfig};
+use config::{
+    ApprovalFeatureMode, NotifyConfig, NotifyConfigUpdate, ServerConfig, SharedNotifyConfig,
+};
 use hooks::PendingNotifications;
 use notifier::Notifier;
 use oauth::OAuthManager;
@@ -116,10 +118,7 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
         let web_routes = Router::new()
             .route("/approvals", get(web::dashboard::<N>))
             .route("/approvals/{id}", get(web::approval_detail::<N>))
-            .route(
-                "/approvals/{id}/resolve",
-                post(web::resolve_approval::<N>),
-            )
+            .route("/approvals/{id}/resolve", post(web::resolve_approval::<N>))
             .route(
                 "/approvals/toggle-mode/{session_id}",
                 post(web::toggle_approval_mode::<N>),
@@ -216,7 +215,10 @@ async fn handle_approval_wait<N: Notifier>(
     // If already resolved, return immediately
     if rx.borrow().is_resolved() {
         let status = rx.borrow().clone();
-        return Ok((axum::http::StatusCode::OK, Json(ApprovalWaitResponse { status })));
+        return Ok((
+            axum::http::StatusCode::OK,
+            Json(ApprovalWaitResponse { status }),
+        ));
     }
 
     // Long-poll: wait up to 55s for a change
@@ -224,7 +226,10 @@ async fn handle_approval_wait<N: Notifier>(
 
     let status = rx.borrow().clone();
     if result.is_ok() && status.is_resolved() {
-        Ok((axum::http::StatusCode::OK, Json(ApprovalWaitResponse { status })))
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(ApprovalWaitResponse { status }),
+        ))
     } else {
         // Timeout or still pending
         Ok((
@@ -295,11 +300,7 @@ async fn handle_get_approval_mode<N: Notifier>(
 }
 
 impl<N: Notifier> AppState<N> {
-    pub fn new(
-        server_config: ServerConfig,
-        notifier: N,
-        oauth: Option<OAuthManager>,
-    ) -> Self {
+    pub fn new(server_config: ServerConfig, notifier: N, oauth: Option<OAuthManager>) -> Self {
         let presence = Presence::new(server_config.presence_ttl_secs);
         let sessions = SessionRegistry::new(server_config.session_ttl_secs)
             .with_default_approval_mode(server_config.default_approval_mode);

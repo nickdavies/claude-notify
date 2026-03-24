@@ -5,25 +5,25 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreClient, CoreProviderMetadata};
 use openidconnect::{
-    AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken,
-    EndpointMaybeSet, EndpointSet, IssuerUrl, Nonce, RedirectUrl, Scope, TokenResponse,
+    AuthenticationFlow, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
+    EndpointSet, IssuerUrl, Nonce, RedirectUrl, Scope, TokenResponse,
 };
 use serde::Deserialize;
 use tower_sessions::Session;
 use tracing::{error, info, warn};
 
-use super::notifier::Notifier;
 use super::AppState;
+use super::notifier::Notifier;
 use crate::error::AppError;
 
 /// Concrete client type returned by `from_provider_metadata` + `set_redirect_uri`.
 type ProviderClient = CoreClient<
-    EndpointSet,               // HasAuthUrl
+    EndpointSet,                   // HasAuthUrl
     openidconnect::EndpointNotSet, // HasDeviceAuthUrl
     openidconnect::EndpointNotSet, // HasIntrospectionUrl
     openidconnect::EndpointNotSet, // HasRevocationUrl
-    EndpointMaybeSet,          // HasTokenUrl
-    EndpointMaybeSet,          // HasUserInfoUrl
+    EndpointMaybeSet,              // HasTokenUrl
+    EndpointMaybeSet,              // HasUserInfoUrl
 >;
 
 /// An OIDC provider configuration.
@@ -76,9 +76,10 @@ impl OAuthManager {
         let mut providers = Vec::new();
 
         // Google OIDC
-        if let (Ok(client_id), Ok(client_secret)) =
-            (env::var("GOOGLE_CLIENT_ID"), env::var("GOOGLE_CLIENT_SECRET"))
-        {
+        if let (Ok(client_id), Ok(client_secret)) = (
+            env::var("GOOGLE_CLIENT_ID"),
+            env::var("GOOGLE_CLIENT_SECRET"),
+        ) {
             let provider = build_provider(
                 "google",
                 "https://accounts.google.com",
@@ -110,13 +111,14 @@ impl OAuthManager {
         }
 
         // Basic auth (for development/testing only)
-        let basic_auth =
-            if let (Ok(user), Ok(password)) = (env::var("BASIC_AUTH_USER"), env::var("BASIC_AUTH_PASSWORD")) {
-                warn!("Basic auth enabled — do NOT use in production");
-                Some(BasicAuthCreds { user, password })
-            } else {
-                None
-            };
+        let basic_auth = if let (Ok(user), Ok(password)) =
+            (env::var("BASIC_AUTH_USER"), env::var("BASIC_AUTH_PASSWORD"))
+        {
+            warn!("Basic auth enabled — do NOT use in production");
+            Some(BasicAuthCreds { user, password })
+        } else {
+            None
+        };
 
         if providers.is_empty() && basic_auth.is_none() {
             return Ok(None);
@@ -352,11 +354,18 @@ pub async fn logout(session: Session) -> Response {
 
 /// Extract authenticated email from session. Returns None if not logged in.
 pub async fn get_session_email(session: &Session) -> Option<String> {
-    session.get::<String>(SESSION_EMAIL_KEY).await.ok().flatten()
+    session
+        .get::<String>(SESSION_EMAIL_KEY)
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Store authenticated email in session.
-pub async fn set_session_email(session: &Session, email: &str) -> Result<(), tower_sessions::session::Error> {
+pub async fn set_session_email(
+    session: &Session,
+    email: &str,
+) -> Result<(), tower_sessions::session::Error> {
     session.insert(SESSION_EMAIL_KEY, email).await
 }
 
