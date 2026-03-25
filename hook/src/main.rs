@@ -69,15 +69,22 @@ struct DelegateArgs {
 
 // --- Wire types ---
 
-/// Minimal hook payload (stdin). Accepts both Claude Code and Cursor field names.
+/// Hook payload received on stdin. Union of Claude Code and Cursor field names.
 #[derive(Deserialize)]
 struct HookInput {
+    /// Claude Code only. See also `conversation_id`.
     session_id: Option<String>,
+    /// Cursor only. Mapped to session_id via `session_id()` accessor.
     conversation_id: Option<String>,
+    /// Both. Claude sends PascalCase (e.g. "PreToolUse"); Cursor sends camelCase (e.g. "preToolUse").
     hook_event_name: Option<String>,
+    /// Both.
     tool_name: Option<String>,
+    /// Both.
     tool_input: Option<serde_json::Value>,
+    /// Both.
     cwd: Option<String>,
+    /// Cursor only. Claude sends `cwd` instead (single directory).
     workspace_roots: Option<Vec<String>>,
 }
 
@@ -1064,8 +1071,10 @@ fn format_claude_output(
     message: Option<&str>,
     reason: Option<&str>,
 ) -> Result<String, String> {
-    match hook_event {
-        "PermissionRequest" => {
+    // Normalize to lowercase for matching — Claude sends PascalCase ("PreToolUse"),
+    // Cursor sends camelCase ("preToolUse"). Output uses canonical PascalCase.
+    match hook_event.to_ascii_lowercase().as_str() {
+        "permissionrequest" => {
             let decision = match status_type {
                 "approved" => {
                     serde_json::json!({
@@ -1088,7 +1097,7 @@ fn format_claude_output(
             });
             serde_json::to_string(&output).map_err(|e| format!("JSON serialization failed: {e}"))
         }
-        "PreToolUse" => {
+        "pretooluse" => {
             let (perm_decision, perm_reason) = match status_type {
                 "approved" => ("allow", message.unwrap_or("")),
                 "denied" | "cancelled" => (
@@ -2135,5 +2144,44 @@ mod tests {
             resolve_action(&config, "Glob", Some(&outside), None, Some(&roots)),
             ResolvedAction::Ask
         ));
+    }
+
+    // --- format_claude_output: case-insensitive event matching ---
+
+    #[test]
+    fn claude_output_pretooluse_pascal_case() {
+        let out = format_claude_output("PreToolUse", "approved", None, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn claude_output_pretooluse_camel_case() {
+        let out = format_claude_output("preToolUse", "approved", None, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    #[test]
+    fn claude_output_permissionrequest_pascal_case() {
+        let out = format_claude_output("PermissionRequest", "denied", None, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
+    #[test]
+    fn claude_output_permissionrequest_camel_case() {
+        let out = format_claude_output("permissionRequest", "approved", None, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PermissionRequest");
+        assert_eq!(v["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    }
+
+    #[test]
+    fn claude_output_unsupported_event() {
+        assert!(format_claude_output("PostToolUse", "approved", None, None).is_err());
     }
 }
