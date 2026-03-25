@@ -26,7 +26,8 @@ use crate::error::AppError;
 use crate::mcp;
 use approvals::{ApprovalRegistry, ApprovalStatus};
 use config::{
-    ApprovalFeatureMode, NotifyConfig, NotifyConfigUpdate, ServerConfig, SharedNotifyConfig,
+    ApprovalFeatureMode, AuthMode, NotifyConfig, NotifyConfigUpdate, ServerConfig,
+    SharedNotifyConfig,
 };
 use hooks::PendingNotifications;
 use notifier::Notifier;
@@ -96,9 +97,13 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
             );
     }
 
-    let api_v1 = api_v1
-        .layer(from_fn_with_state(state.clone(), auth::require_auth::<N>))
-        .with_state(state.clone());
+    let api_v1 = if state.config.auth_mode == AuthMode::None {
+        api_v1.with_state(state.clone())
+    } else {
+        api_v1
+            .layer(from_fn_with_state(state.clone(), auth::require_auth::<N>))
+            .with_state(state.clone())
+    };
 
     let public = Router::new().route("/health", get(health));
 
@@ -106,28 +111,31 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
 
     // Mount web UI and OAuth routes when approval mode is not disabled
     if state.config.approval_mode != ApprovalFeatureMode::Disabled {
-        // Auth routes (public, no auth required)
-        let auth_routes = Router::new()
-            .route("/auth/login", get(web::login_page::<N>))
-            .route("/auth/login/basic", post(web::basic_auth_login::<N>))
-            .route("/auth/start/{provider}", get(oauth::start_auth::<N>))
-            .route("/auth/callback/{provider}", get(oauth::callback::<N>))
-            .route("/auth/logout", post(oauth::logout))
-            .with_state(state.clone());
-
-        // Web UI routes (session auth enforced by middleware)
-        let web_routes = Router::new()
+        // Web UI routes
+        let mut web_routes = Router::new()
             .route("/approvals", get(web::dashboard::<N>))
             .route("/approvals/{id}", get(web::approval_detail::<N>))
             .route("/approvals/{id}/resolve", post(web::resolve_approval::<N>))
             .route(
                 "/approvals/toggle-mode/{session_id}",
                 post(web::toggle_approval_mode::<N>),
-            )
-            .layer(from_fn(auth::require_web_auth))
-            .with_state(state.clone());
+            );
 
-        app = app.merge(auth_routes).merge(web_routes);
+        if state.config.auth_mode != AuthMode::None {
+            // Auth routes (public, no auth required)
+            let auth_routes = Router::new()
+                .route("/auth/login", get(web::login_page::<N>))
+                .route("/auth/login/basic", post(web::basic_auth_login::<N>))
+                .route("/auth/start/{provider}", get(oauth::start_auth::<N>))
+                .route("/auth/callback/{provider}", get(oauth::callback::<N>))
+                .route("/auth/logout", post(oauth::logout))
+                .with_state(state.clone());
+
+            web_routes = web_routes.layer(from_fn(auth::require_web_auth));
+            app = app.merge(auth_routes);
+        }
+
+        app = app.merge(web_routes.with_state(state.clone()));
     }
 
     // Session layer for OAuth (in-memory store, sessions lost on restart)
