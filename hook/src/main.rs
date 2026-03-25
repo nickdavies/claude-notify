@@ -288,7 +288,7 @@ struct ToolDef {
 const TOOL_DEFS: &[ToolDef] = &[
     // File read
     ToolDef { name: "Read", category: ToolCategory::FileRead, fields: &["path", "file_path"], array_field: None },
-    ToolDef { name: "Grep", category: ToolCategory::FileRead, fields: &["path"], array_field: None },
+    ToolDef { name: "Grep", category: ToolCategory::FileRead, fields: &["path", "file_path"], array_field: None },
     ToolDef { name: "Glob", category: ToolCategory::FileRead, fields: &["target_directory"], array_field: None },
     ToolDef { name: "SemanticSearch", category: ToolCategory::FileRead, fields: &[], array_field: Some("target_directories") },
     // File write
@@ -512,12 +512,18 @@ fn resolve_action(
         ));
     }
 
-    // Pre-compute workspace membership (None if no paths or no workspace_roots)
-    let path_in_workspace: Option<bool> = if resolved_paths.is_empty() {
-        None
-    } else {
+    // Pre-compute workspace membership (None if no paths or no workspace_roots).
+    // For path-based tools with no explicit path arg, fall back to cwd.
+    let path_in_workspace: Option<bool> = if !resolved_paths.is_empty() {
         workspace_roots
             .map(|roots| resolved_paths.iter().all(|p| is_in_workspace(p, roots)))
+    } else if is_path_tool(tool_name) {
+        match (cwd, workspace_roots) {
+            (Some(cwd), Some(roots)) => Some(is_in_workspace(cwd, roots)),
+            _ => None,
+        }
+    } else {
+        None
     };
 
     eprintln!(
@@ -1873,7 +1879,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_without_path_skips_workspace_rules() {
+    fn grep_without_path_or_cwd_skips_workspace_rules() {
         let config = make_config(
             vec![
                 make_workspace_rule(&["Grep"], RuleAction::Allow, Some(true)),
@@ -1884,10 +1890,35 @@ mod tests {
         let roots = vec!["/home/user/project".to_string()];
         let input = serde_json::json!({"pattern": "TODO"});
 
-        // No path arg means no workspace determination, both rules skipped
+        // No path arg AND no cwd means no workspace determination, both rules skipped
         assert!(matches!(
             resolve_action(&config, "Grep", Some(&input), None, Some(&roots)),
             ResolvedAction::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn grep_without_path_falls_back_to_cwd_for_workspace() {
+        let config = make_config(
+            vec![
+                make_workspace_rule(&["Grep"], RuleAction::Allow, Some(true)),
+                make_workspace_rule(&["Grep"], RuleAction::Ask, Some(false)),
+            ],
+            DefaultAction::Deny,
+        );
+        let roots = vec!["/home/user/project".to_string()];
+        let input = serde_json::json!({"pattern": "TODO"});
+
+        // No path arg but cwd is inside workspace => falls back to cwd
+        assert!(matches!(
+            resolve_action(&config, "Grep", Some(&input), Some("/home/user/project"), Some(&roots)),
+            ResolvedAction::Allow
+        ));
+
+        // No path arg but cwd is outside workspace
+        assert!(matches!(
+            resolve_action(&config, "Grep", Some(&input), Some("/tmp"), Some(&roots)),
+            ResolvedAction::Ask
         ));
     }
 
