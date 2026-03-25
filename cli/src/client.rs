@@ -57,7 +57,7 @@ impl Client {
             .await
             .map_err(|e| format!("request failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("server returned {}", resp.status()));
+            return Err(format!("{} returned {}", url, resp.status()));
         }
         resp.json()
             .await
@@ -87,7 +87,7 @@ impl Client {
             .await
             .map_err(|e| format!("request failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("server returned {}", resp.status()));
+            return Err(format!("{} returned {}", url, resp.status()));
         }
         Ok(())
     }
@@ -101,7 +101,7 @@ impl Client {
             .await
             .map_err(|e| format!("connection failed: {e}"))?;
         if !resp.status().is_success() {
-            return Err(format!("server returned {}", resp.status()));
+            return Err(format!("{} returned {}", url, resp.status()));
         }
         Ok(())
     }
