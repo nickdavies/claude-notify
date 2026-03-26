@@ -126,8 +126,7 @@ pub async fn approval_detail<N: Notifier>(
 
     let tool_input_pretty =
         serde_json::to_string_pretty(&approval.tool_input).unwrap_or_else(|_| "{}".to_string());
-    let approval_json =
-        serde_json::to_string(&approval).unwrap_or_else(|_| "{}".to_string());
+    let approval_json = serde_json::to_string(&approval).unwrap_or_else(|_| "{}".to_string());
     let readwrite = state.config.approval_mode == ApprovalFeatureMode::Readwrite;
     let has_auth = state.config.auth_mode != crate::server::config::AuthMode::None;
 
