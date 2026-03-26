@@ -6,11 +6,13 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY server/Cargo.toml server/Cargo.toml
 COPY hook/Cargo.toml hook/Cargo.toml
-RUN mkdir -p server/src hook/src \
+COPY cli/Cargo.toml cli/Cargo.toml
+RUN mkdir -p server/src hook/src cli/src \
     && echo 'fn main() {}' > server/src/main.rs \
     && echo 'fn main() {}' > hook/src/main.rs \
+    && echo 'fn main() {}' > cli/src/main.rs \
     && cargo build --release -p claude-notify \
-    && rm -rf server/src hook/src target/release/deps/claude_notify*
+    && rm -rf server/src hook/src cli/src target/release/deps/claude_notify*
 
 # Build real source (server only)
 COPY server/src/ server/src/
