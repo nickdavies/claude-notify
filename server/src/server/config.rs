@@ -15,8 +15,18 @@ pub enum ApprovalFeatureMode {
     Readwrite,
 }
 
+/// Authentication mode for the server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    /// Bearer token authentication required.
+    Token,
+    /// No authentication. Intended for localhost / Docker use only.
+    None,
+}
+
 /// Immutable server configuration loaded from environment at startup.
 pub struct ServerConfig {
+    pub auth_mode: AuthMode,
     pub tokens: Vec<Token>,
     pub listen_addr: String,
     pub presence_ttl_secs: u64,
@@ -34,14 +44,28 @@ pub struct Token {
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, AppError> {
-        let raw_tokens = env::var("CLAUDE_NOTIFY_TOKENS")
-            .map_err(|_| AppError::Config("CLAUDE_NOTIFY_TOKENS not set".into()))?;
-        let tokens = parse_tokens(&raw_tokens)?;
-        if tokens.is_empty() {
-            return Err(AppError::Config("CLAUDE_NOTIFY_TOKENS is empty".into()));
-        }
+        let auth_mode = match env::var("AUTH_MODE").unwrap_or_default().as_str() {
+            "none" => AuthMode::None,
+            _ => AuthMode::Token,
+        };
 
-        let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+        let tokens = if auth_mode == AuthMode::Token {
+            let raw_tokens = env::var("CLAUDE_NOTIFY_TOKENS")
+                .map_err(|_| AppError::Config("CLAUDE_NOTIFY_TOKENS not set".into()))?;
+            let tokens = parse_tokens(&raw_tokens)?;
+            if tokens.is_empty() {
+                return Err(AppError::Config("CLAUDE_NOTIFY_TOKENS is empty".into()));
+            }
+            tokens
+        } else {
+            Vec::new()
+        };
+
+        let default_addr = match auth_mode {
+            AuthMode::None => "127.0.0.1:8080",
+            AuthMode::Token => "0.0.0.0:8080",
+        };
+        let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| default_addr.into());
         let presence_ttl_secs = env::var("PRESENCE_TTL")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -80,6 +104,7 @@ impl ServerConfig {
         };
 
         Ok(Self {
+            auth_mode,
             tokens,
             listen_addr,
             presence_ttl_secs,

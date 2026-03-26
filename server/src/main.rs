@@ -12,7 +12,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use server::config::ApprovalFeatureMode;
-use server::notifier::Notifier;
+use server::notifier::{Notifier, NullNotifier};
 use server::oauth::OAuthManager;
 use server::pushover::PushoverClient;
 use server::storage::{LocalFileStorage, NullStorage, Storage};
@@ -60,6 +60,12 @@ enum NotifierArgs {
         #[command(subcommand)]
         storage: Option<StorageArgs>,
     },
+
+    /// No notifications (for localhost/Docker use with CLI approval tool)
+    Noop {
+        #[command(subcommand)]
+        storage: Option<StorageArgs>,
+    },
 }
 
 /// Storage backend configuration.
@@ -95,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
                 let notifier = WebhookClient::new(url);
                 serve_with_storage(notifier, storage).await
             }
+            NotifierArgs::Noop { storage } => serve_with_storage(NullNotifier, storage).await,
         },
     }
 }
@@ -122,8 +129,10 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
         server::config::ServerConfig::from_env().context("failed to load server config")?;
     let listen_addr = config.listen_addr.clone();
 
-    // Initialize OAuth if approval mode requires it
-    let oauth = if config.approval_mode != ApprovalFeatureMode::Disabled {
+    // Initialize OAuth if approval mode requires it (skip when auth is disabled)
+    let oauth = if config.approval_mode != ApprovalFeatureMode::Disabled
+        && config.auth_mode != server::config::AuthMode::None
+    {
         let base_url = config
             .base_url
             .as_ref()

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ pub struct Approval {
     pub id: Uuid,
     pub request_id: String,
     pub session_id: String,
+    pub session_display_name: String,
     pub project: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
@@ -25,7 +26,7 @@ pub enum ApprovalStatus {
     Pending,
     Approved { message: Option<String> },
     Denied { reason: String },
-    Superseded,
+    Cancelled,
 }
 
 impl ApprovalStatus {
@@ -43,8 +44,18 @@ pub struct ApprovalRegistry {
     entries: RwLock<HashMap<Uuid, ApprovalEntry>>,
     /// request_id -> approval Uuid (idempotency)
     by_request_id: RwLock<HashMap<String, Uuid>>,
-    /// session_id -> approval Uuid (one per session)
-    by_session_id: RwLock<HashMap<String, Uuid>>,
+    /// session_id -> approval Uuids (multiple approvals per session)
+    by_session_id: RwLock<HashMap<String, HashSet<Uuid>>>,
+}
+
+pub struct RegisterApproval {
+    pub request_id: String,
+    pub session_id: String,
+    pub session_display_name: String,
+    pub project: String,
+    pub tool_name: String,
+    pub tool_input: serde_json::Value,
+    pub context: Option<String>,
 }
 
 impl ApprovalRegistry {
@@ -57,20 +68,11 @@ impl ApprovalRegistry {
     }
 
     /// Register a new approval or return existing one if request_id matches.
-    /// Supersedes any existing approval for the same session.
-    pub async fn register(
-        &self,
-        request_id: String,
-        session_id: String,
-        project: String,
-        tool_name: String,
-        tool_input: serde_json::Value,
-        context: Option<String>,
-    ) -> Approval {
+    pub async fn register(&self, params: RegisterApproval) -> Approval {
         // Idempotency: if request_id already registered, return existing
         {
             let by_req = self.by_request_id.read().await;
-            if let Some(&existing_id) = by_req.get(&request_id) {
+            if let Some(&existing_id) = by_req.get(&params.request_id) {
                 let entries = self.entries.read().await;
                 if let Some(entry) = entries.get(&existing_id) {
                     return entry.approval.clone();
@@ -78,18 +80,16 @@ impl ApprovalRegistry {
             }
         }
 
-        // Supersede any existing approval for this session
-        self.supersede_session(&session_id).await;
-
         let id = Uuid::new_v4();
         let approval = Approval {
             id,
-            request_id: request_id.clone(),
-            session_id: session_id.clone(),
-            project,
-            tool_name,
-            tool_input,
-            context,
+            request_id: params.request_id.clone(),
+            session_id: params.session_id.clone(),
+            session_display_name: params.session_display_name,
+            project: params.project,
+            tool_name: params.tool_name,
+            tool_input: params.tool_input,
+            context: params.context,
             created_at: Utc::now(),
             status: ApprovalStatus::Pending,
         };
@@ -106,11 +106,11 @@ impl ApprovalRegistry {
         }
         {
             let mut by_req = self.by_request_id.write().await;
-            by_req.insert(request_id, id);
+            by_req.insert(params.request_id, id);
         }
         {
             let mut by_sess = self.by_session_id.write().await;
-            by_sess.insert(session_id, id);
+            by_sess.entry(params.session_id).or_default().insert(id);
         }
 
         info!(approval_id = %id, "approval registered");
@@ -154,29 +154,15 @@ impl ApprovalRegistry {
             .collect()
     }
 
-    /// Supersede any existing pending approval for a session.
-    async fn supersede_session(&self, session_id: &str) {
-        let old_id = {
-            let by_sess = self.by_session_id.read().await;
-            by_sess.get(session_id).copied()
-        };
-
-        if let Some(old_id) = old_id {
-            self.resolve(old_id, ApprovalStatus::Superseded).await;
-            info!(approval_id = %old_id, session_id, "approval superseded");
-        }
-    }
-
     /// Remove all approvals for a session (on session eviction).
     pub async fn evict_session(&self, session_id: &str) {
-        let approval_id = {
+        let approval_ids = {
             let mut by_sess = self.by_session_id.write().await;
-            by_sess.remove(session_id)
+            by_sess.remove(session_id).unwrap_or_default()
         };
 
-        if let Some(id) = approval_id {
-            self.resolve(id, ApprovalStatus::Superseded).await;
-            // Clean up from entries and request_id index
+        for id in approval_ids {
+            self.resolve(id, ApprovalStatus::Cancelled).await;
             let request_id = {
                 let mut entries = self.entries.write().await;
                 entries.remove(&id).map(|e| e.approval.request_id)
@@ -216,7 +202,7 @@ impl ApprovalRegistry {
             let (tx, _rx) = watch::channel(ApprovalStatus::Pending);
             entries.insert(id, ApprovalEntry { approval, tx });
             by_req.insert(request_id, id);
-            by_sess.insert(session_id, id);
+            by_sess.entry(session_id).or_default().insert(id);
             info!(approval_id = %id, "approval restored");
         }
     }
