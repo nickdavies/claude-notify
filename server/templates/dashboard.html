@@ -16,6 +16,11 @@
         .deny-input.visible { display: flex; gap: 0.5rem; align-items: center; }
         .deny-input input { margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem; }
         .deny-input button { margin: 0; padding: 0.25rem 0.5rem; font-size: 0.85rem; white-space: nowrap; }
+        tr.meta-row td { border-bottom: none; }
+        tr.tool-preview { display: none; }
+        tr.tool-preview td { border-top: none; padding-top: 0; padding-bottom: 0.75rem; }
+        tr.tool-preview.visible { display: table-row; }
+        tr.tool-preview code { font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; color: var(--pico-muted-color); }
     </style>
 </head>
 <body>
@@ -46,7 +51,7 @@
         </thead>
         <tbody>
             {% for a in pending_approvals %}
-            <tr data-id="{{ a.id }}">
+            <tr class="meta-row" data-id="{{ a.id }}">
                 <td>{{ a.project }}</td>
                 <td>{{ a.session_display_name }}</td>
                 <td>{{ a.tool_name }}</td>
@@ -64,6 +69,9 @@
                     </div>
                     {% endif %}
                 </td>
+            </tr>
+            <tr class="tool-preview" data-id="{{ a.id }}" data-tool-input="{{ a.tool_input }}">
+                <td colspan="5"><code></code></td>
             </tr>
             {% endfor %}
         </tbody>
@@ -134,8 +142,39 @@
 (function() {
     const READWRITE = {{ readwrite }};
     const POLL_MS = 2000;
+    const MAX_DETAIL_LEN = 2000;
     let selectedIdx = -1;
     let denyActiveId = null;
+
+    function inputSummary(input) {
+        if (input == null) return '';
+        if (typeof input === 'string') return truncDetail(input);
+        if (typeof input !== 'object' || Array.isArray(input)) return truncDetail(JSON.stringify(input));
+        if ('command' in input && typeof input.command === 'string') return truncDetail(input.command);
+        const firstStr = Object.values(input).find(v => typeof v === 'string');
+        if (firstStr) return truncDetail(firstStr);
+        return truncDetail(JSON.stringify(input));
+    }
+
+    function truncDetail(s) {
+        return s.length > MAX_DETAIL_LEN ? s.slice(0, MAX_DETAIL_LEN) + '…' : s;
+    }
+
+    // Fill in content for server-rendered preview rows
+    document.querySelectorAll('tr.tool-preview[data-tool-input]').forEach(row => {
+        const code = row.querySelector('code');
+        if (!code) return;
+        try {
+            const input = JSON.parse(row.dataset.toolInput);
+            code.textContent = inputSummary(input);
+        } catch(e) {}
+    });
+
+    // Auto-select first approval on page load
+    if (getMetaRows().length > 0) {
+        selectedIdx = 0;
+        updateSelection();
+    }
 
     // --- Polling ---
     async function poll() {
@@ -162,28 +201,30 @@
 
         // Don't blow away the DOM while user is typing a deny reason
         if (denyActiveId) {
-            // Just update the known IDs so we can detect removals
             const currentIds = new Set(approvals.map(a => a.id));
             if (!currentIds.has(denyActiveId)) {
-                // The approval being denied was resolved externally — reset
                 denyActiveId = null;
             } else {
-                return; // preserve input state, skip full rerender
+                return;
             }
         }
 
+        const wasEmpty = selectedIdx < 0;
         if (approvals.length === 0) {
             container.innerHTML = '<p>No pending approvals.</p>';
             selectedIdx = -1;
             return;
         }
+        if (wasEmpty) selectedIdx = 0;
         let html = `<table id="approvals-table"><thead><tr>
             <th>Project</th><th>Session</th><th>Tool</th><th>Time</th><th>Action</th>
             </tr></thead><tbody>`;
         approvals.forEach((a, i) => {
             const time = new Date(a.created_at).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
-            const cls = i === selectedIdx ? ' class="selected"' : '';
-            html += `<tr data-id="${a.id}"${cls}>
+            const sel = i === selectedIdx;
+            const metaCls = sel ? 'meta-row selected' : 'meta-row';
+            const prevCls = sel ? 'tool-preview selected visible' : 'tool-preview';
+            html += `<tr class="${metaCls}" data-id="${a.id}">
                 <td>${esc(a.project)}</td>
                 <td>${esc(a.session_display_name)}</td>
                 <td>${esc(a.tool_name)}</td>
@@ -200,12 +241,11 @@
                 </div>`;
             }
             html += `</td></tr>`;
+            html += `<tr class="${prevCls}" data-id="${a.id}"><td colspan="5"><code>${esc(inputSummary(a.tool_input))}</code></td></tr>`;
         });
         html += '</tbody></table>';
         container.innerHTML = html;
-        // Clamp selection
         if (selectedIdx >= approvals.length) selectedIdx = approvals.length - 1;
-        updateSelection();
     }
 
     function renderSessions(sessions) {
@@ -243,18 +283,27 @@
     }
 
     // --- Selection ---
-    function getRows() {
+    function getMetaRows() {
         const table = document.getElementById('approvals-table');
-        return table ? Array.from(table.querySelectorAll('tbody tr')) : [];
+        return table ? Array.from(table.querySelectorAll('tbody tr.meta-row')) : [];
     }
 
     function updateSelection() {
-        const rows = getRows();
-        rows.forEach((r, i) => r.classList.toggle('selected', i === selectedIdx));
+        const table = document.getElementById('approvals-table');
+        if (!table) return;
+        table.querySelectorAll('tbody tr.meta-row').forEach((r, i) => {
+            const sel = i === selectedIdx;
+            r.classList.toggle('selected', sel);
+            const preview = r.nextElementSibling;
+            if (preview && preview.classList.contains('tool-preview')) {
+                preview.classList.toggle('selected', sel);
+                preview.classList.toggle('visible', sel);
+            }
+        });
     }
 
     function moveSelection(delta) {
-        const rows = getRows();
+        const rows = getMetaRows();
         if (rows.length === 0) return;
         if (selectedIdx < 0) { selectedIdx = 0; }
         else { selectedIdx = Math.max(0, Math.min(rows.length - 1, selectedIdx + delta)); }
@@ -262,7 +311,7 @@
     }
 
     function getSelectedId() {
-        const rows = getRows();
+        const rows = getMetaRows();
         if (selectedIdx >= 0 && selectedIdx < rows.length) {
             return rows[selectedIdx].dataset.id;
         }
@@ -319,7 +368,6 @@
 
     // --- Keyboard shortcuts ---
     document.addEventListener('keydown', function(e) {
-        // Skip when typing in an input
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 
         const key = e.key;
