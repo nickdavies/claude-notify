@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use capabilities::ApprovalContext;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -13,7 +14,7 @@ pub struct Approval {
     pub project: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
-    pub context: Option<String>,
+    pub context: ApprovalContext,
     pub created_at: DateTime<Utc>,
 }
 

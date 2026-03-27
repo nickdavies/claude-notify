@@ -19,7 +19,7 @@ use server::storage::{LocalFileStorage, NullStorage, Storage};
 use server::webhook::WebhookClient;
 
 #[derive(Parser)]
-#[command(name = "claude-notify", version)]
+#[command(name = "agent-hub-server", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

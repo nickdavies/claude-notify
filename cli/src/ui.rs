@@ -507,13 +507,21 @@ fn build_expanded_lines(
         }
     }
 
-    if let Some(context) = &approval.context {
+    if let Some(extra) = &approval.context.extra {
+        let text = if let Some(reason) = extra
+            .get("dippy_reason")
+            .and_then(|v: &serde_json::Value| v.as_str())
+        {
+            format!("Dippy: {reason}")
+        } else {
+            format!("Context: {}", extra)
+        };
         lines.push(ExpandedLine {
             text: String::new(),
             kind: LineKind::Separator,
         });
         lines.push(ExpandedLine {
-            text: truncate_str(&format!("Context: {context}"), max_line_width),
+            text: truncate_str(&text, max_line_width),
             kind: LineKind::Info,
         });
     }

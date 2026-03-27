@@ -1,0 +1,11 @@
+{
+  "name": "opencode-plugin-agent-hub",
+  "version": "0.1.0",
+  "description": "opencode plugin: routes permission.ask through agent-hub-gateway",
+  "type": "module",
+  "main": "agent-hub.ts",
+  "oc-plugin": ["server"],
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.3.3"
+  }
+}

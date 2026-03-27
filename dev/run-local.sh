@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 # --- Build ---
-echo "Building claude-notify..."
+echo "Building agent-hub..."
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" 2>&1 | tail -3
 
 # --- Start webhook logger ---
@@ -40,8 +40,8 @@ WEBHOOK_PID=$!
 sleep 0.3
 
 # --- Start server ---
-echo "Starting claude-notify on :${SERVER_PORT}..."
-export CLAUDE_NOTIFY_TOKENS="test:${TOKEN}"
+echo "Starting agent-hub-server on :${SERVER_PORT}..."
+export AGENT_HUB_TOKENS="test:${TOKEN}"
 export LISTEN_ADDR="127.0.0.1:${SERVER_PORT}"
 export APPROVAL_MODE=readwrite
 export BASE_URL
@@ -60,14 +60,14 @@ else
     echo "  Google OIDC: disabled (set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET to enable)"
 fi
 
-"$ROOT_DIR/target/debug/claude-notify" serve webhook --url "http://127.0.0.1:${WEBHOOK_PORT}" &
+"$ROOT_DIR/target/debug/agent-hub-server" serve webhook --url "http://127.0.0.1:${WEBHOOK_PORT}" &
 SERVER_PID=$!
 sleep 1
 
 # --- Print cheat sheet ---
 echo ""
 echo "============================================================"
-echo " claude-notify test harness running"
+echo " agent-hub test harness running"
 echo "============================================================"
 echo ""
 echo "  Web UI:    ${BASE_URL}/auth/login"

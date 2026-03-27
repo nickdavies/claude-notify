@@ -13,21 +13,21 @@ use ui::{Action, DenyInputResult, Mode, Ui};
 
 #[derive(Parser)]
 #[command(
-    name = "claude-review",
+    name = "agent-hub-review",
     version,
-    about = "Interactive CLI for reviewing Claude Code approvals"
+    about = "Interactive CLI for reviewing agent tool approval requests"
 )]
 struct Args {
     /// Server URL
     #[arg(
         long,
-        env = "CLAUDE_NOTIFY_SERVER",
+        env = "AGENT_HUB_SERVER",
         default_value = "http://localhost:8080"
     )]
     server: String,
 
     /// Bearer token for authenticated servers (optional for no-auth mode)
-    #[arg(long, env = "CLAUDE_NOTIFY_TOKEN")]
+    #[arg(long, env = "AGENT_HUB_TOKEN")]
     token: Option<String>,
 
     /// Poll interval in seconds

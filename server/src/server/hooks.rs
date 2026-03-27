@@ -5,6 +5,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
+use capabilities::ApprovalContext;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -194,17 +195,20 @@ fn extract_session(payload: &HookPayload) -> Option<(String, String)> {
     }
 }
 
-/// Request body for POST /hooks/approval
+/// Request body for POST /api/v1/hooks/approval
 #[derive(Deserialize)]
 pub struct ApprovalRequest {
-    pub request_id: String,
+    pub id: String,
     pub session_id: String,
     pub session_display_name: String,
     pub cwd: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
-    pub context: Option<String>,
-    pub editor_type: Option<EditorType>,
+    /// Provider identifier: "claude-code" | "cursor" | "opencode"
+    pub provider: String,
+    /// Request type: "tool_use" (Phase 2 will add "plan_question")
+    pub request_type: String,
+    pub context: ApprovalContext,
 }
 
 /// Response for POST /hooks/approval
@@ -222,19 +226,21 @@ pub async fn approval<N: Notifier>(
 ) -> Json<ApprovalResponse> {
     let project = state
         .sessions
-        .get_or_register(&req.session_id, &req.cwd, req.editor_type)
+        .get_or_register(&req.session_id, &req.cwd, None)
         .await;
 
     let approval = state
         .approvals
         .register(approvals::RegisterApproval {
-            request_id: req.request_id,
+            request_id: req.id,
             session_id: req.session_id,
             session_display_name: req.session_display_name,
             project: project.clone(),
             tool_name: req.tool_name.clone(),
             tool_input: req.tool_input.clone(),
-            context: req.context.clone(),
+            provider: req.provider,
+            request_type: req.request_type,
+            context: req.context,
         })
         .await;
 
@@ -244,7 +250,7 @@ pub async fn approval<N: Notifier>(
     {
         let url = format!("{}/approvals/{}", base_url, approval.id);
         let notifier = Arc::clone(&state.notifier);
-        let title = "Claude Code (approval)".to_string();
+        let title = "Agent Hub (approval)".to_string();
         let message = format!(
             "[{project}] {} — {}",
             req.tool_name,
