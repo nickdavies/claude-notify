@@ -1,4 +1,4 @@
-# claude-notify
+# agent-hub-server
 
 > **Experimental** — This project is under active development. APIs, configuration, and behavior may change without notice.
 
@@ -8,7 +8,7 @@ A notification server for [Claude Code](https://docs.anthropic.com/en/docs/claud
 
 Claude Code can run autonomously for long stretches, then block on a permission prompt or finish a task while you're away from your desk. The built-in notification hook runs a local shell script — fine for simple cases, but it can't know whether you're actually sitting at your computer.
 
-claude-notify solves this by running as a server (designed for k8s, works anywhere) that:
+agent-hub-server solves this by running as a server (designed for k8s, works anywhere) that:
 
 - **Gates notifications on presence** — a motion sensor (or any HTTP client) posts your presence state; notifications are suppressed while you're present
 - **Tracks sessions** — auto-registers Claude Code sessions on first hook contact, with per-session notification control
@@ -20,14 +20,14 @@ claude-notify solves this by running as a server (designed for k8s, works anywhe
 
 ```
                                               ┌──Pushover API──▶  Phone
-Claude Code  ──HTTP hooks──▶  claude-notify  ─┤
+Claude Code  ──HTTP hooks──▶  agent-hub-server  ─┤
      │                             ▲          └──Webhook POST──▶  Your service
      ├──MCP (HTTP)──▶  /mcp       │
      │                             │
 Motion sensor  ────────────────────┘  POST /presence
 ```
 
-Single binary (`claude-notify serve <backend>`), single process. REST API and MCP protocol are served together.
+Single binary (`agent-hub-server serve <backend>`), single process. REST API and MCP protocol are served together.
 
 ## Setup
 
@@ -48,9 +48,9 @@ Uses the [Pushover](https://pushover.net/) API to send push notifications to you
 | `PUSHOVER_USER` | Pushover user key |
 
 ```sh
-claude-notify serve pushover
+agent-hub-server serve pushover
 # or explicitly:
-claude-notify serve pushover --token "..." --user "..."
+agent-hub-server serve pushover --token "..." --user "..."
 ```
 
 #### Webhook
@@ -62,7 +62,7 @@ POSTs a JSON payload to any URL. Useful for integrating with Slack, Discord, Hom
 | `WEBHOOK_URL` | URL to POST notifications to |
 
 ```sh
-claude-notify serve webhook --url "https://example.com/notify"
+agent-hub-server serve webhook --url "https://example.com/notify"
 ```
 
 The payload is:
@@ -78,7 +78,7 @@ The payload is:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CLAUDE_NOTIFY_TOKENS` | yes | — | Auth tokens (see [Authentication](#authentication)) |
+| `AGENT_HUB_TOKENS` | yes | — | Auth tokens (see [Authentication](#authentication)) |
 | `LISTEN_ADDR` | no | `127.0.0.1:8080` (no-auth) / `0.0.0.0:8080` (token) | Bind address |
 | `PRESENCE_TTL` | no | `120` | Seconds before presence degrades to `away` |
 | `SESSION_TTL` | no | `7200` | Seconds before idle sessions are evicted |
@@ -89,7 +89,7 @@ The payload is:
 ```sh
 export PUSHOVER_TOKEN="..."
 export PUSHOVER_USER="..."
-export CLAUDE_NOTIFY_TOKENS="desktop:some-secret-token"
+export AGENT_HUB_TOKENS="desktop:some-secret-token"
 
 cargo run -- serve pushover
 ```
@@ -98,7 +98,7 @@ Or with webhook:
 
 ```sh
 export WEBHOOK_URL="https://example.com/notify"
-export CLAUDE_NOTIFY_TOKENS="desktop:some-secret-token"
+export AGENT_HUB_TOKENS="desktop:some-secret-token"
 
 cargo run -- serve webhook
 ```
@@ -108,18 +108,18 @@ cargo run -- serve webhook
 By default, state is not persisted across restarts. To persist sessions, config, and presence:
 
 ```sh
-claude-notify serve pushover local-file --path state.json
+agent-hub-server serve pushover local-file --path state.json
 ```
 
 ### Run with Docker
 
 ```sh
-docker build -t claude-notify .
+docker build -t agent-hub-server .
 docker run -p 8080:8080 \
   -e PUSHOVER_TOKEN="..." \
   -e PUSHOVER_USER="..." \
-  -e CLAUDE_NOTIFY_TOKENS="desktop:some-secret-token" \
-  claude-notify serve pushover
+  -e AGENT_HUB_TOKENS="desktop:some-secret-token" \
+  agent-hub-server serve pushover
 ```
 
 ### Configure Claude Code
@@ -136,8 +136,8 @@ Add HTTP hooks to `~/.claude/settings.json`:
             "type": "http",
             "url": "https://your-server/hooks/stop",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -150,8 +150,8 @@ Add HTTP hooks to `~/.claude/settings.json`:
             "type": "http",
             "url": "https://your-server/hooks/notification",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -163,8 +163,8 @@ Add HTTP hooks to `~/.claude/settings.json`:
             "type": "http",
             "url": "https://your-server/hooks/session-end",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -173,7 +173,7 @@ Add HTTP hooks to `~/.claude/settings.json`:
 }
 ```
 
-Set `CLAUDE_NOTIFY_TOKEN` in your shell profile to match one of the tokens in `CLAUDE_NOTIFY_TOKENS`.
+Set `AGENT_HUB_TOKEN` in your shell profile to match one of the tokens in `AGENT_HUB_TOKENS`.
 
 ### Enable MCP tools (optional)
 
@@ -182,11 +182,11 @@ Create `~/.claude/.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "claude-notify": {
+    "agent-hub-server": {
       "type": "http",
       "url": "https://your-server/mcp",
       "headers": {
-        "Authorization": "Bearer ${CLAUDE_NOTIFY_TOKEN}"
+        "Authorization": "Bearer ${AGENT_HUB_TOKEN}"
       }
     }
   }
@@ -237,17 +237,17 @@ Generate tokens with `openssl`:
 openssl rand -hex 32
 ```
 
-Then set `CLAUDE_NOTIFY_TOKENS` as a comma-separated list of `label:token` pairs:
+Then set `AGENT_HUB_TOKENS` as a comma-separated list of `label:token` pairs:
 
 ```sh
-export CLAUDE_NOTIFY_TOKENS="desktop:$(openssl rand -hex 32),sensor:$(openssl rand -hex 32)"
+export AGENT_HUB_TOKENS="desktop:$(openssl rand -hex 32),sensor:$(openssl rand -hex 32)"
 ```
 
 The label is an arbitrary name for logging — it identifies which client made a request. If you omit the label (just a bare token), the token itself is used as the identifier in logs.
 
 Give each client its corresponding token:
 
-- **Claude Code** — set `CLAUDE_NOTIFY_TOKEN` in your shell profile to the `desktop` token
+- **Claude Code** — set `AGENT_HUB_TOKEN` in your shell profile to the `desktop` token
 - **Motion sensor** — configure it with the `sensor` token
 - **Other machines** — add more `label:token` entries as needed
 

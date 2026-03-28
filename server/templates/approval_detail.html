@@ -34,12 +34,15 @@
     <article>
         <header>
             <h3 id="tool-name">{{ approval.tool_name }}</h3>
-            <p id="meta">Project: <strong>{{ approval.project }}</strong> · {{ approval.session_display_name }}</p>
+            <p id="meta">Project: <strong>{{ approval.project }}</strong> · {{ approval.session_display_name }} · <code>{{ approval.provider }}</code></p>
         </header>
 
         <div id="context-section">
-        {% if let Some(ctx) = approval.context.as_ref() %}
-        <p><em>{{ ctx }}</em></p>
+        {% if let Some(extra) = approval.context.extra.as_ref() %}
+        <details open>
+            <summary>Context</summary>
+            <pre><code>{{ extra }}</code></pre>
+        </details>
         {% endif %}
         </div>
 

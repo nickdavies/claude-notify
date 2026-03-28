@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use capabilities::ApprovalContext;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
@@ -15,7 +16,11 @@ pub struct Approval {
     pub project: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
-    pub context: Option<String>,
+    /// Provider that originated this approval request (e.g. "claude-code", "cursor", "opencode").
+    pub provider: String,
+    /// Request type; currently always "tool_use". "plan_question" is Phase 2.
+    pub request_type: String,
+    pub context: ApprovalContext,
     pub created_at: DateTime<Utc>,
     pub status: ApprovalStatus,
 }
@@ -55,7 +60,9 @@ pub struct RegisterApproval {
     pub project: String,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
-    pub context: Option<String>,
+    pub provider: String,
+    pub request_type: String,
+    pub context: ApprovalContext,
 }
 
 impl ApprovalRegistry {
@@ -89,6 +96,8 @@ impl ApprovalRegistry {
             project: params.project,
             tool_name: params.tool_name,
             tool_input: params.tool_input,
+            provider: params.provider,
+            request_type: params.request_type,
             context: params.context,
             created_at: Utc::now(),
             status: ApprovalStatus::Pending,

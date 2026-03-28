@@ -1,8 +1,8 @@
-# claude-notify Deployment & Cutover
+# agent-hub-server Deployment & Cutover
 
 ## What's built
 
-The server is complete at `~/workspaces/claude_notify/server/`. It builds cleanly, 12 tests pass, zero warnings.
+The server is complete at `~/workspaces/agent-hub/server/`. It builds cleanly, 12 tests pass, zero warnings.
 
 ### Project structure
 ```
@@ -29,7 +29,7 @@ src/
 
 | Var | Description |
 |-----|-------------|
-| `CLAUDE_NOTIFY_TOKENS` | Comma-separated `label:secret` pairs (e.g. `desktop:abc123,sensor:def456`) |
+| `AGENT_HUB_TOKENS` | Comma-separated `label:secret` pairs (e.g. `desktop:abc123,sensor:def456`) |
 | `PUSHOVER_TOKEN` | Pushover API token (if using `serve pushover`) |
 | `PUSHOVER_USER` | Pushover user key (if using `serve pushover`) |
 | `WEBHOOK_URL` | Webhook URL (if using `serve webhook`) |
@@ -41,9 +41,9 @@ src/
 ### Build & push image
 
 ```sh
-cd ~/workspaces/claude_notify/server
-docker build -t <registry>/claude-notify:latest .
-docker push <registry>/claude-notify:latest
+cd ~/workspaces/agent-hub/server
+docker build -t <registry>/agent-hub-server:latest .
+docker push <registry>/agent-hub-server:latest
 ```
 
 The container command should be `serve pushover` or `serve webhook` depending on your backend:
@@ -62,7 +62,7 @@ command: ["serve", "webhook"]
 - Service (ClusterIP or LoadBalancer)
 - Ingress or gateway route with TLS (the hooks use HTTPS)
 - Health check: `GET /health` (no auth)
-- Secret for env vars (CLAUDE_NOTIFY_TOKENS + backend-specific vars)
+- Secret for env vars (AGENT_HUB_TOKENS + backend-specific vars)
 
 ## 2. Verify the server
 
@@ -126,7 +126,7 @@ curl -v $URL/sessions
 
 Add to your shell profile:
 ```sh
-export CLAUDE_NOTIFY_TOKEN="<your-desktop-token>"
+export AGENT_HUB_TOKEN="<your-desktop-token>"
 ```
 
 ### 3b. Update `~/.claude/settings.json`
@@ -151,8 +151,8 @@ Replace the current hooks config. Keep dippy, remove PostToolUse (cancel_notify 
             "type": "http",
             "url": "https://<your-server>/hooks/session-end",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -164,8 +164,8 @@ Replace the current hooks config. Keep dippy, remove PostToolUse (cancel_notify 
             "type": "http",
             "url": "https://<your-server>/hooks/stop",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -178,8 +178,8 @@ Replace the current hooks config. Keep dippy, remove PostToolUse (cancel_notify 
             "type": "http",
             "url": "https://<your-server>/hooks/notification",
             "timeout": 5,
-            "headers": { "Authorization": "Bearer $CLAUDE_NOTIFY_TOKEN" },
-            "allowedEnvVars": ["CLAUDE_NOTIFY_TOKEN"]
+            "headers": { "Authorization": "Bearer $AGENT_HUB_TOKEN" },
+            "allowedEnvVars": ["AGENT_HUB_TOKEN"]
           }
         ]
       }
@@ -205,11 +205,11 @@ Replace the current hooks config. Keep dippy, remove PostToolUse (cancel_notify 
 ```json
 {
   "mcpServers": {
-    "claude-notify": {
+    "agent-hub-server": {
       "type": "http",
       "url": "https://<your-server>/mcp",
       "headers": {
-        "Authorization": "Bearer ${CLAUDE_NOTIFY_TOKEN}"
+        "Authorization": "Bearer ${AGENT_HUB_TOKEN}"
       }
     }
   }
@@ -225,7 +225,7 @@ rm ~/.claude/hooks/cancel_notify.sh
 rm -rf ~/.claude/hooks/state/
 ```
 
-The `CLAUDE_NOTIFY=1` env var is no longer needed — remove from shell profile.
+The `CLAUDE_NOTIFY=1` env var is no longer needed — remove from shell profile if present.
 
 ## 4. Motion sensor integration
 

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "default": "ask",
+  "rules": [
+    { "tools": ["@file_read"], "action": "allow" },
+    { "tools": ["@shell"], "action": "delegate", "command": "dippy --claude" }
+  ]
+}

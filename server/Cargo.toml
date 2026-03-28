@@ -1,13 +1,18 @@
 [package]
-name = "claude-notify"
+name = "agent-hub-server"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "agent-hub-server"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
 askama = "0.15"
 askama_web = { version = "0.15", features = ["axum-0.8"] }
 axum = "0.8"
+capabilities = { path = "../capabilities" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 openidconnect = "4"

@@ -50,11 +50,11 @@ impl ServerConfig {
         };
 
         let tokens = if auth_mode == AuthMode::Token {
-            let raw_tokens = env::var("CLAUDE_NOTIFY_TOKENS")
-                .map_err(|_| AppError::Config("CLAUDE_NOTIFY_TOKENS not set".into()))?;
+            let raw_tokens = env::var("AGENT_HUB_TOKENS")
+                .map_err(|_| AppError::Config("AGENT_HUB_TOKENS not set".into()))?;
             let tokens = parse_tokens(&raw_tokens)?;
             if tokens.is_empty() {
-                return Err(AppError::Config("CLAUDE_NOTIFY_TOKENS is empty".into()));
+                return Err(AppError::Config("AGENT_HUB_TOKENS is empty".into()));
             }
             tokens
         } else {

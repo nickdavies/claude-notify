@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "default": "deny",
+  "rules": [
+    { "tools": ["@file", "@shell"], "pattern": "**/.ssh/**", "action": "deny", "message": ".ssh access denied" },
+    { "tools": ["@file_read"], "action": "allow" },
+    { "tools": ["@file_write"], "action": "allow", "in_workspace": true },
+    { "tools": ["@file_write"], "action": "deny", "in_workspace": false, "message": "writes outside workspace are denied" },
+    { "tools": ["@shell"], "action": "allow" },
+    { "tools": ["WebFetch"], "action": "deny", "message": "web fetch denied by policy" }
+  ]
+}
