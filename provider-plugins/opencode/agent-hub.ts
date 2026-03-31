@@ -7,8 +7,8 @@
  *
  * Environment variables (set in the shell that launches opencode):
  *   AGENT_HUB_GATEWAY   path to the gateway binary (default: "agent-hub-gateway")
- *   AGENT_HUB_SERVER    server URL, e.g. https://hub.example.com
- *   AGENT_HUB_TOKEN     bearer token for server auth
+ *   AGENT_HUB_SERVER    server URL (default: "http://localhost:8080")
+ *   AGENT_HUB_TOKEN     bearer token for server auth (default: none)
  *   AGENT_HUB_CONFIG    path to tools.json rule config (optional)
  *
  * Installation: add to .opencode/config.json:
@@ -72,8 +72,8 @@ async function callGateway(payload: object): Promise<GatewayResult> {
   const config = process.env.AGENT_HUB_CONFIG
 
   const args: string[] = ["--opencode"]
-  args.push("--server", server ?? "http://localhost:0")
-  args.push("--token", token ?? "none")
+  args.push("--server", server ?? "http://localhost:8080")
+  args.push("--token", token ?? "")
   if (config) args.push("--config", config)
 
   log("INFO ", "callGateway", { bin, config: config ?? "(none)" })
@@ -104,8 +104,8 @@ async function callGateway(payload: object): Promise<GatewayResult> {
     })
 
     proc.on("error", (err: Error) => {
-      log("ERROR", "gateway spawn error", { err: err.message, bin })
-      resolve({ allowed: false, reason: `gateway: ${err.message}` })
+      log("ERROR", "gateway spawn error — falling back to ask", { err: err.message, bin })
+      resolve({ allowed: false, reason: err.message })
     })
 
     proc.stdin.end(JSON.stringify(payload))
