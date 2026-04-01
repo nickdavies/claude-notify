@@ -173,6 +173,12 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
             for session_id in &evicted {
                 approvals.evict_session(session_id).await;
             }
+            // Cancel approvals whose gateway has stopped polling (killed, crashed,
+            // or lost connectivity). Threshold is 2× the 55s long-poll window.
+            let orphaned = approvals.evict_orphaned(Duration::from_secs(120)).await;
+            if orphaned > 0 {
+                info!(count = orphaned, "cancelled orphaned approvals");
+            }
         }
     });
 

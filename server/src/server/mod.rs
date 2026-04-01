@@ -243,6 +243,9 @@ async fn handle_approval_wait<N: Notifier>(
         .await
         .ok_or_else(|| AppError::ApprovalNotFound(id.to_string()))?;
 
+    // Record that the gateway is actively polling for this approval.
+    state.approvals.touch(id).await;
+
     // If already resolved, return immediately
     if rx.borrow().is_resolved() {
         let status = rx.borrow().clone();
