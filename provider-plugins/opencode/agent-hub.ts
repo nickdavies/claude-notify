@@ -17,6 +17,7 @@
 
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin"
 import type { PermissionRequest } from "@opencode-ai/sdk/v2"
+import type { createOpencodeClient as createV2Client } from "@opencode-ai/sdk/v2"
 import path from "path"
 import fs from "fs"
 import { spawn } from "child_process"
@@ -123,8 +124,9 @@ function makePayload(
   tool: string,
   toolInput: Record<string, string>,
   cwd: string,
+  title?: string,
 ): object {
-  return {
+  const payload: Record<string, unknown> = {
     session_id: sessionId,
     tool_name: tool,
     tool_input: toolInput,
@@ -132,6 +134,8 @@ function makePayload(
     workspace_roots: [cwd],
     hook_event_name: "permission.ask",
   }
+  if (title) payload.session_title = title
+  return payload
 }
 
 // Resolve a path value against base, but only if it is relative.
@@ -146,12 +150,47 @@ function apply(r: GatewayResult, output: { status: "allow" | "deny" | "ask"; mes
 }
 
 // ---------------------------------------------------------------------------
+// Session title cache — avoids repeated SDK calls for the same session.
+// Stores the LLM-generated title once it's available; null means we haven't
+// fetched a non-default title yet and should retry next time.
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TITLE_RE = /^(New session - |Child session - )\d{4}-\d{2}-\d{2}T/
+
+type V2Client = ReturnType<typeof createV2Client>
+
+const titles: Map<string, string> = new Map()
+
+async function fetchTitle(
+  client: V2Client,
+  sid: string,
+): Promise<string | undefined> {
+  const cached = titles.get(sid)
+  if (cached) return cached
+
+  try {
+    const res = await client.session.get({ sessionID: sid })
+    const title = res.data?.title
+    if (title && !DEFAULT_TITLE_RE.test(title)) {
+      titles.set(sid, title)
+      return title
+    }
+    return undefined
+  } catch (err) {
+    log("WARN ", "failed to fetch session title", { sid, err: String(err) })
+    return undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin export
 // ---------------------------------------------------------------------------
 
 export const id = "agent-hub"
 
 const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
+  // The runtime client is a v2 client; PluginInput still references v1 types.
+  const client = input.client as unknown as V2Client
   const { directory, worktree } = input
 
   return {
@@ -171,6 +210,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
 
       const tool = PERM_TO_TOOL[info.permission] ?? info.permission
       const sid = info.sessionID
+      const title = await fetchTitle(client, sid)
 
       // -----------------------------------------------------------------
       // bash: use the raw unparsed command from metadata rather than the
@@ -178,7 +218,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "bash" && typeof info.metadata.command === "string") {
         const result = await callGateway(
-          makePayload(sid, tool, { command: info.metadata.command }, directory),
+          makePayload(sid, tool, { command: info.metadata.command }, directory, title),
         )
         apply(result, output)
         return
@@ -195,7 +235,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         if (Array.isArray(info.metadata.files)) {
           for (const file of info.metadata.files as Array<{ filePath: string }>) {
             const result = await callGateway(
-              makePayload(sid, tool, { path: file.filePath }, directory),
+              makePayload(sid, tool, { path: file.filePath }, directory, title),
             )
             if (!result.allowed) {
               apply(result, output)
@@ -209,7 +249,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         // write/edit: scalar filepath in metadata (already absolute)
         if (typeof info.metadata.filepath === "string") {
           const result = await callGateway(
-            makePayload(sid, tool, { path: info.metadata.filepath }, directory),
+            makePayload(sid, tool, { path: info.metadata.filepath }, directory, title),
           )
           apply(result, output)
           return
@@ -218,7 +258,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         // Fallback: patterns entries are worktree-relative — resolve against worktree
         for (const pat of info.patterns) {
           const result = await callGateway(
-            makePayload(sid, tool, { path: resolvePath(pat, worktree) }, directory),
+            makePayload(sid, tool, { path: resolvePath(pat, worktree) }, directory, title),
           )
           if (!result.allowed) {
             apply(result, output)
@@ -234,7 +274,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "read") {
         const result = await callGateway(
-          makePayload(sid, tool, { path: info.patterns[0] ?? "" }, directory),
+          makePayload(sid, tool, { path: info.patterns[0] ?? "" }, directory, title),
         )
         apply(result, output)
         return
@@ -245,7 +285,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "webfetch" && typeof info.metadata.url === "string") {
         const result = await callGateway(
-          makePayload(sid, tool, { url: info.metadata.url }, directory),
+          makePayload(sid, tool, { url: info.metadata.url }, directory, title),
         )
         apply(result, output)
         return
@@ -260,7 +300,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // We do NOT loop over info.pattern — those are opencode-internal
       // representations unrelated to what the gateway expects.
       // -----------------------------------------------------------------
-      const result = await callGateway(makePayload(sid, tool, {}, directory))
+      const result = await callGateway(makePayload(sid, tool, {}, directory, title))
       apply(result, output)
     },
   }
