@@ -537,13 +537,40 @@ async fn escalate_to_server(
         approval.id, cli.timeout
     );
 
+    let cancel_url = format!("{base}/api/v1/approvals/{}/resolve", approval.id);
+
+    tokio::select! {
+        result = poll_for_decision(&client, &wait_url, &cli.token, deadline, cli.timeout) => result,
+        _ = shutdown_signal() => {
+            eprintln!("[info] received shutdown signal, cancelling approval {}", approval.id);
+            // Best-effort cancel — don't let this block shutdown for long.
+            let _ = client
+                .post(&cancel_url)
+                .bearer_auth(&cli.token)
+                .json(&serde_json::json!({"decision": "cancel"}))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await;
+            Err(RunError::ServerUnreachable("aborted by signal".to_string()))
+        }
+    }
+}
+
+/// Long-poll the server until the approval is resolved or the global timeout expires.
+async fn poll_for_decision(
+    client: &reqwest::Client,
+    wait_url: &str,
+    token: &str,
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+) -> Result<HookDecision, RunError> {
     let mut attempt: u32 = 0;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             eprintln!(
                 "[error] approval timed out after {}s with no decision — denying",
-                cli.timeout
+                timeout_secs
             );
             return Err(RunError::ServerUnreachable(
                 "approval timed out".to_string(),
@@ -553,8 +580,8 @@ async fn escalate_to_server(
         attempt += 1;
 
         let resp = client
-            .get(&wait_url)
-            .bearer_auth(&cli.token)
+            .get(wait_url)
+            .bearer_auth(token)
             .timeout(Duration::from_secs(60))
             .send()
             .await;
@@ -626,6 +653,27 @@ async fn escalate_to_server(
             wait.message,
             wait.reason,
         ));
+    }
+}
+
+/// Wait for a shutdown signal (SIGTERM or SIGINT on Unix, Ctrl+C elsewhere).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            _ = sigint.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install ctrl+c handler");
     }
 }
 

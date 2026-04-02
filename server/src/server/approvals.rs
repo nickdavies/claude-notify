@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use capabilities::ApprovalContext;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
+use tokio::time::Instant;
 use tracing::info;
 use uuid::Uuid;
 
@@ -43,6 +45,9 @@ impl ApprovalStatus {
 struct ApprovalEntry {
     approval: Approval,
     tx: watch::Sender<ApprovalStatus>,
+    /// Tracks when a gateway last polled `/wait` for this approval.
+    /// `None` means no poll has occurred yet (freshly registered).
+    last_polled_at: Option<Instant>,
 }
 
 pub struct ApprovalRegistry {
@@ -107,6 +112,7 @@ impl ApprovalRegistry {
         let entry = ApprovalEntry {
             approval: approval.clone(),
             tx,
+            last_polled_at: None,
         };
 
         {
@@ -186,6 +192,46 @@ impl ApprovalRegistry {
         }
     }
 
+    /// Record that a gateway polled for this approval (called from the wait handler).
+    pub async fn touch(&self, id: Uuid) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(&id) {
+            entry.last_polled_at = Some(Instant::now());
+        }
+    }
+
+    /// Cancel pending approvals whose gateway has stopped polling.
+    ///
+    /// An approval is considered orphaned when:
+    /// - It is still pending, AND
+    /// - A gateway has polled for it at least once (`last_polled_at` is set), AND
+    /// - The last poll was longer ago than `threshold`.
+    ///
+    /// Returns the number of approvals cancelled.
+    pub async fn evict_orphaned(&self, threshold: Duration) -> usize {
+        let now = Instant::now();
+        let orphaned_ids: Vec<Uuid> = {
+            let entries = self.entries.read().await;
+            entries
+                .iter()
+                .filter(|(_, entry)| {
+                    !entry.approval.status.is_resolved()
+                        && entry
+                            .last_polled_at
+                            .is_some_and(|t| now.duration_since(t) > threshold)
+                })
+                .map(|(&id, _)| id)
+                .collect()
+        };
+
+        let count = orphaned_ids.len();
+        for id in orphaned_ids {
+            self.resolve(id, ApprovalStatus::Cancelled).await;
+            info!(approval_id = %id, "approval cancelled (orphaned — gateway stopped polling)");
+        }
+        count
+    }
+
     /// Export pending approvals for persistence, sorted by creation time.
     pub async fn snapshot(&self) -> Vec<Approval> {
         let entries = self.entries.read().await;
@@ -213,7 +259,14 @@ impl ApprovalRegistry {
             let session_id = approval.session_id.clone();
 
             let (tx, _rx) = watch::channel(ApprovalStatus::Pending);
-            entries.insert(id, ApprovalEntry { approval, tx });
+            entries.insert(
+                id,
+                ApprovalEntry {
+                    approval,
+                    tx,
+                    last_polled_at: None,
+                },
+            );
             by_req.insert(request_id, id);
             by_sess.entry(session_id).or_default().insert(id);
             info!(approval_id = %id, "approval restored");

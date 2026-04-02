@@ -20,7 +20,7 @@ import type { PermissionRequest } from "@opencode-ai/sdk/v2"
 import type { OpencodeClient } from "@opencode-ai/sdk"
 import path from "path"
 import fs from "fs"
-import { spawn } from "child_process"
+import { spawn, type ChildProcess } from "child_process"
 
 // ---------------------------------------------------------------------------
 // Minimal structured logger — writes to the same dev.log opencode uses.
@@ -59,6 +59,37 @@ const PERM_TO_TOOL: Record<string, string> = {
 }
 
 // ---------------------------------------------------------------------------
+// Gateway subprocess tracking — kill on session abort
+// ---------------------------------------------------------------------------
+
+const procs: Map<string, Set<ChildProcess>> = new Map()
+
+function track(sid: string, proc: ChildProcess) {
+  let set = procs.get(sid)
+  if (!set) {
+    set = new Set()
+    procs.set(sid, set)
+  }
+  set.add(proc)
+}
+
+function untrack(sid: string, proc: ChildProcess) {
+  const set = procs.get(sid)
+  if (!set) return
+  set.delete(proc)
+  if (set.size === 0) procs.delete(sid)
+}
+
+function killGateways(sid: string) {
+  const set = procs.get(sid)
+  if (!set || set.size === 0) return
+  log("INFO ", "killing gateway subprocesses on abort", { sid, count: String(set.size) })
+  for (const proc of set) {
+    try { proc.kill("SIGTERM") } catch {}
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Single-pattern gateway call
 // ---------------------------------------------------------------------------
 
@@ -68,7 +99,7 @@ interface GatewayResult {
   reason?: string
 }
 
-async function callGateway(payload: object): Promise<GatewayResult> {
+async function callGateway(sid: string, payload: object): Promise<GatewayResult> {
   const bin = process.env.AGENT_HUB_GATEWAY ?? "agent-hub-gateway"
   const server = process.env.AGENT_HUB_SERVER
   const token = process.env.AGENT_HUB_TOKEN
@@ -83,6 +114,7 @@ async function callGateway(payload: object): Promise<GatewayResult> {
 
   return new Promise((resolve) => {
     const proc = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] })
+    track(sid, proc)
 
     let stdout = ""
     let stderr = ""
@@ -90,6 +122,7 @@ async function callGateway(payload: object): Promise<GatewayResult> {
     proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString() })
 
     proc.on("close", (code: number | null) => {
+      untrack(sid, proc)
       if (stderr) log("INFO ", "gateway stderr", { output: stderr.trim() })
       // Exit 1 = server unreachable or approval timed out — deny, do not fall back to opencode ask.
       if (code === 1) {
@@ -107,6 +140,7 @@ async function callGateway(payload: object): Promise<GatewayResult> {
     })
 
     proc.on("error", (err: Error) => {
+      untrack(sid, proc)
       log("ERROR", "gateway spawn error — falling back to ask", { err: err.message, bin })
       resolve({ allowed: false, ask: true, reason: err.message })
     })
@@ -235,7 +269,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "bash" && typeof info.metadata.command === "string") {
         const result = await callGateway(
-          makePayload(sid, tool, { command: info.metadata.command }, directory, title),
+          sid, makePayload(sid, tool, { command: info.metadata.command }, directory, title),
         )
         apply(result, output)
         return
@@ -252,7 +286,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         if (Array.isArray(info.metadata.files)) {
           for (const file of info.metadata.files as Array<{ filePath: string }>) {
             const result = await callGateway(
-              makePayload(sid, tool, { path: file.filePath }, directory, title),
+              sid, makePayload(sid, tool, { path: file.filePath }, directory, title),
             )
             if (!result.allowed) {
               apply(result, output)
@@ -266,7 +300,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         // write/edit: scalar filepath in metadata (already absolute)
         if (typeof info.metadata.filepath === "string") {
           const result = await callGateway(
-            makePayload(sid, tool, { path: info.metadata.filepath }, directory, title),
+            sid, makePayload(sid, tool, { path: info.metadata.filepath }, directory, title),
           )
           apply(result, output)
           return
@@ -275,7 +309,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
         // Fallback: patterns entries are worktree-relative — resolve against worktree
         for (const pat of info.patterns) {
           const result = await callGateway(
-            makePayload(sid, tool, { path: resolvePath(pat, worktree) }, directory, title),
+            sid, makePayload(sid, tool, { path: resolvePath(pat, worktree) }, directory, title),
           )
           if (!result.allowed) {
             apply(result, output)
@@ -291,7 +325,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "read") {
         const result = await callGateway(
-          makePayload(sid, tool, { path: info.patterns[0] ?? "" }, directory, title),
+          sid, makePayload(sid, tool, { path: info.patterns[0] ?? "" }, directory, title),
         )
         apply(result, output)
         return
@@ -302,7 +336,7 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // -----------------------------------------------------------------
       if (info.permission === "webfetch" && typeof info.metadata.url === "string") {
         const result = await callGateway(
-          makePayload(sid, tool, { url: info.metadata.url }, directory, title),
+          sid, makePayload(sid, tool, { url: info.metadata.url }, directory, title),
         )
         apply(result, output)
         return
@@ -317,8 +351,16 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
       // We do NOT loop over info.pattern — those are opencode-internal
       // representations unrelated to what the gateway expects.
       // -----------------------------------------------------------------
-      const result = await callGateway(makePayload(sid, tool, {}, directory, title))
+      const result = await callGateway(sid, makePayload(sid, tool, {}, directory, title))
       apply(result, output)
+    },
+
+    event: async ({ event }) => {
+      if (event.type !== "session.error") return
+      const props = event.properties as { sessionID?: string; error?: { name: string } }
+      if (props.error?.name !== "MessageAbortedError") return
+      const sid = props.sessionID
+      if (sid) killGateways(sid)
     },
   }
 }
