@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use capabilities::{ApprovalContext, DecisionStatus, HookDecision, Provider, ToolHookEvent};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use config::{
     ResolvedAction, ToolCategory, default_to_resolved, expand_tilde, find_tool_def,
     load_tool_config, resolve_action,
@@ -24,6 +24,20 @@ use uuid::Uuid;
 #[derive(Parser)]
 #[command(name = "agent-hub-gateway", version)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Process a tool-use approval hook (reads hook payload from stdin)
+    Approval(ApprovalArgs),
+    /// Report session status to the server (reads status JSON from stdin)
+    StatusReport(StatusReportArgs),
+}
+
+#[derive(Args)]
+struct ApprovalArgs {
     /// Use Claude Code provider
     #[arg(long, conflicts_with_all = ["cursor", "opencode"])]
     claude: bool,
@@ -51,6 +65,17 @@ struct Cli {
     /// Path to tool routing config file (JSON)
     #[arg(long, default_value = "~/.config/agent-hub/tools.json")]
     config: String,
+}
+
+#[derive(Args)]
+struct StatusReportArgs {
+    /// Server URL (e.g. https://hub.example.com)
+    #[arg(long, env = "AGENT_HUB_SERVER")]
+    server: String,
+
+    /// Bearer token for server auth
+    #[arg(long, env = "AGENT_HUB_TOKEN")]
+    token: String,
 }
 
 // --- Server wire types ---
@@ -137,20 +162,27 @@ enum RunError {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let provider: Box<dyn Provider> = if cli.claude {
+    match cli.command {
+        Command::Approval(args) => run_approval(args).await,
+        Command::StatusReport(args) => run_status_report(args).await,
+    }
+}
+
+async fn run_approval(args: ApprovalArgs) -> ExitCode {
+    let provider: Box<dyn Provider> = if args.claude {
         Box::new(ClaudeCode)
-    } else if cli.cursor {
+    } else if args.cursor {
         Box::new(Cursor)
-    } else if cli.opencode {
+    } else if args.opencode {
         Box::new(Opencode)
     } else {
         eprintln!("agent-hub-gateway: one of --claude, --cursor, or --opencode is required");
         return ExitCode::from(2);
     };
 
-    let config_path = expand_tilde(&cli.config);
+    let config_path = expand_tilde(&args.config);
 
-    match run(&cli, &*provider, &config_path).await {
+    match run(&args, &*provider, &config_path).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(RunError::ServerUnreachable(e)) => {
             eprintln!("agent-hub-gateway: {e}");
@@ -163,7 +195,51 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: &Cli, provider: &dyn Provider, config_path: &str) -> Result<(), RunError> {
+async fn run_status_report(args: StatusReportArgs) -> ExitCode {
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("agent-hub-gateway: failed to read stdin: {e}");
+        return ExitCode::from(2);
+    }
+
+    // Validate it's valid JSON (basic sanity check)
+    if let Err(e) = serde_json::from_str::<serde_json::Value>(&input) {
+        eprintln!("agent-hub-gateway: invalid JSON: {e}");
+        return ExitCode::from(2);
+    }
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/hooks/status", args.server.trim_end_matches('/'));
+
+    match client
+        .post(&url)
+        .bearer_auth(&args.token)
+        .header("content-type", "application/json")
+        .body(input)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => ExitCode::SUCCESS,
+        Ok(resp) => {
+            eprintln!(
+                "agent-hub-gateway: status report returned {}",
+                resp.status()
+            );
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("agent-hub-gateway: status report failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+async fn run(
+    args: &ApprovalArgs,
+    provider: &dyn Provider,
+    config_path: &str,
+) -> Result<(), RunError> {
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
@@ -214,7 +290,7 @@ async fn run(cli: &Cli, provider: &dyn Provider, config_path: &str) -> Result<()
                 event.tool_name
             );
             let extra = collect_extra(&event.tool_name, &event.tool_input, None);
-            escalate_to_server(cli, provider, &event, extra).await?
+            escalate_to_server(args, provider, &event, extra).await?
         }
         ResolvedAction::Delegate(ref command) => {
             eprintln!("[info] delegating tool={} to: {}", event.tool_name, command);
@@ -249,7 +325,7 @@ async fn run(cli: &Cli, provider: &dyn Provider, config_path: &str) -> Result<()
                         &event.tool_input,
                         result.reason.as_deref(),
                     );
-                    escalate_to_server(cli, provider, &event, extra).await?
+                    escalate_to_server(args, provider, &event, extra).await?
                 }
                 _ => {
                     // Delegate returned nothing parseable; fall back to config default
@@ -276,7 +352,7 @@ async fn run(cli: &Cli, provider: &dyn Provider, config_path: &str) -> Result<()
                                 event.tool_name
                             );
                             let extra = collect_extra(&event.tool_name, &event.tool_input, None);
-                            escalate_to_server(cli, provider, &event, extra).await?
+                            escalate_to_server(args, provider, &event, extra).await?
                         }
                         ResolvedAction::Delegate(_) => unreachable!(),
                     }
@@ -462,13 +538,13 @@ fn make_unified_diff(old: &str, new: &str, label: &str) -> String {
 
 /// POST an approval request to the server and long-poll until resolved.
 async fn escalate_to_server(
-    cli: &Cli,
+    args: &ApprovalArgs,
     provider: &dyn Provider,
     event: &ToolHookEvent,
     extra: Option<serde_json::Value>,
 ) -> Result<HookDecision, RunError> {
     let client = reqwest::Client::new();
-    let base = cli.server.trim_end_matches('/');
+    let base = args.server.trim_end_matches('/');
 
     let context = ApprovalContext {
         workspace_roots: event.workspace_roots.clone(),
@@ -484,7 +560,7 @@ async fn escalate_to_server(
     );
     let register_resp = client
         .post(&register_url)
-        .bearer_auth(&cli.token)
+        .bearer_auth(&args.token)
         .json(&ApprovalRequest {
             id: request_id,
             session_id: event.session_id.clone(),
@@ -529,24 +605,24 @@ async fn escalate_to_server(
     }
 
     // Long-poll until resolved or global timeout
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(cli.timeout);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.timeout);
     let wait_url = format!("{base}/api/v1/approvals/{}/wait", approval.id);
 
     eprintln!(
         "[info] waiting for approval (id={}, timeout={}s) — approve or deny in the web UI",
-        approval.id, cli.timeout
+        approval.id, args.timeout
     );
 
     let cancel_url = format!("{base}/api/v1/approvals/{}/resolve", approval.id);
 
     tokio::select! {
-        result = poll_for_decision(&client, &wait_url, &cli.token, deadline, cli.timeout) => result,
+        result = poll_for_decision(&client, &wait_url, &args.token, deadline, args.timeout) => result,
         _ = shutdown_signal() => {
             eprintln!("[info] received shutdown signal, cancelling approval {}", approval.id);
             // Best-effort cancel — don't let this block shutdown for long.
             let _ = client
                 .post(&cancel_url)
-                .bearer_auth(&cli.token)
+                .bearer_auth(&args.token)
                 .json(&serde_json::json!({"decision": "cancel"}))
                 .timeout(Duration::from_secs(5))
                 .send()

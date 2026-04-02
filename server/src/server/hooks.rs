@@ -15,7 +15,7 @@ use super::AppState;
 use super::approvals;
 use super::approvals::ApprovalStatus;
 use super::notifier::Notifier;
-use super::sessions::EditorType;
+use super::sessions::{EditorType, SessionStatus};
 use crate::server::presence::PresenceState;
 
 /// Common fields from hook payloads. Serde ignores unknown fields by default.
@@ -109,8 +109,26 @@ pub async fn stop<N: Notifier>(
         );
     }
 
-    state.sessions.deregister(&session_id).await;
+    state
+        .sessions
+        .set_status(&session_id, SessionStatus::Ended, None, None)
+        .await;
 
+    StatusCode::OK
+}
+
+/// POST /hooks/session-end
+pub async fn session_end<N: Notifier>(
+    State(state): State<AppState<N>>,
+    Json(payload): Json<HookPayload>,
+) -> StatusCode {
+    if let Some(session_id) = &payload.session_id {
+        state.pending.cancel(session_id).await;
+        state
+            .sessions
+            .set_status(session_id, SessionStatus::Ended, None, None)
+            .await;
+    }
     StatusCode::OK
 }
 
@@ -176,18 +194,6 @@ pub async fn notification<N: Notifier>(
     StatusCode::OK
 }
 
-/// POST /hooks/session-end
-pub async fn session_end<N: Notifier>(
-    State(state): State<AppState<N>>,
-    Json(payload): Json<HookPayload>,
-) -> StatusCode {
-    if let Some(session_id) = &payload.session_id {
-        state.pending.cancel(session_id).await;
-        state.sessions.deregister(session_id).await;
-    }
-    StatusCode::OK
-}
-
 fn extract_session(payload: &HookPayload) -> Option<(String, String)> {
     match (&payload.session_id, &payload.cwd) {
         (Some(sid), Some(cwd)) => Some((sid.clone(), cwd.clone())),
@@ -228,6 +234,14 @@ pub async fn approval<N: Notifier>(
         .sessions
         .get_or_register(&req.session_id, &req.cwd, None)
         .await;
+
+    // Cache the display name on the session (it arrives with every approval request)
+    if !req.session_display_name.is_empty() {
+        state
+            .sessions
+            .set_display_name(&req.session_id, req.session_display_name.clone())
+            .await;
+    }
 
     let approval = state
         .approvals
@@ -275,6 +289,46 @@ fn truncate_input(input: &serde_json::Value) -> String {
     } else {
         s
     }
+}
+
+/// Request body for POST /api/v1/hooks/status
+#[derive(Deserialize)]
+pub struct StatusReport {
+    pub session_id: String,
+    pub cwd: String,
+    pub status: SessionStatus,
+    pub waiting_reason: Option<String>,
+    pub display_name: Option<String>,
+    pub editor_type: Option<EditorType>,
+}
+
+/// POST /api/v1/hooks/status — report session status from a client.
+pub async fn status<N: Notifier>(
+    State(state): State<AppState<N>>,
+    Json(req): Json<StatusReport>,
+) -> StatusCode {
+    // Ensure session exists
+    state
+        .sessions
+        .get_or_register(&req.session_id, &req.cwd, req.editor_type)
+        .await;
+
+    state
+        .sessions
+        .set_status(
+            &req.session_id,
+            req.status,
+            req.waiting_reason,
+            req.display_name,
+        )
+        .await;
+
+    // Cancel pending notifications when session ends
+    if req.status == SessionStatus::Ended {
+        state.pending.cancel(&req.session_id).await;
+    }
+
+    StatusCode::OK
 }
 
 async fn fire_and_forget<N: Notifier>(notifier: &N, title: &str, message: &str, url: Option<&str>) {

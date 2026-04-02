@@ -169,7 +169,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let evicted = sessions.evict_stale().await;
+            let evicted = sessions.evict_stale(Duration::from_secs(1800)).await;
             for session_id in &evicted {
                 approvals.evict_session(session_id).await;
             }

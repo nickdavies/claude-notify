@@ -171,6 +171,19 @@ impl ApprovalRegistry {
         pending
     }
 
+    /// Returns the first (oldest) pending approval for the given session, if any.
+    pub async fn first_pending_for_session(&self, session_id: &str) -> Option<Approval> {
+        let by_session = self.by_session_id.read().await;
+        let entries = self.entries.read().await;
+        by_session.get(session_id).and_then(|ids| {
+            ids.iter()
+                .filter_map(|id| entries.get(id))
+                .filter(|e| !e.approval.status.is_resolved())
+                .min_by_key(|e| e.approval.created_at)
+                .map(|e| e.approval.clone())
+        })
+    }
+
     /// Remove all approvals for a session (on session eviction).
     pub async fn evict_session(&self, session_id: &str) {
         let approval_ids = {

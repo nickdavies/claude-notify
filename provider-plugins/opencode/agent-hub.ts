@@ -90,6 +90,96 @@ function killGateways(sid: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Status reporting — fire-and-forget via gateway status-report subcommand
+// ---------------------------------------------------------------------------
+
+const statusTimers: Map<string, NodeJS.Timeout> = new Map()
+const DEBOUNCE_MS = 2000
+
+// Track sessions we've already registered on the server so the first
+// permission.ask for a new session triggers an immediate "active" report.
+const registeredSessions: Set<string> = new Set()
+
+// On process exit, report all tracked sessions as ended so the dashboard
+// doesn't leave stale "active" / "idle" entries after opencode shuts down.
+let exitHandled = false
+function onExit() {
+  if (exitHandled) return
+  exitHandled = true
+  for (const sid of registeredSessions) {
+    // Cancel any pending debounced reports — we want "ended" immediately.
+    const pending = statusTimers.get(sid)
+    if (pending) clearTimeout(pending)
+    statusTimers.delete(sid)
+    spawnStatusReport(sid, "ended")
+  }
+  registeredSessions.clear()
+}
+process.on("exit", onExit)
+process.on("SIGINT", onExit)
+process.on("SIGTERM", onExit)
+
+function reportStatus(
+  sid: string,
+  status: "active" | "idle" | "waiting" | "ended",
+  opts?: { waitingReason?: string; displayName?: string },
+) {
+  // "ended" should fire immediately — no debounce
+  if (status === "ended") {
+    const existing = statusTimers.get(sid)
+    if (existing) clearTimeout(existing)
+    statusTimers.delete(sid)
+    spawnStatusReport(sid, status, opts)
+    return
+  }
+
+  const existing = statusTimers.get(sid)
+  if (existing) clearTimeout(existing)
+
+  const timer = setTimeout(() => {
+    statusTimers.delete(sid)
+    spawnStatusReport(sid, status, opts)
+  }, DEBOUNCE_MS)
+
+  statusTimers.set(sid, timer)
+}
+
+function spawnStatusReport(
+  sid: string,
+  status: string,
+  opts?: { waitingReason?: string; displayName?: string },
+) {
+  const bin = process.env.AGENT_HUB_GATEWAY ?? "agent-hub-gateway"
+  const server = process.env.AGENT_HUB_SERVER ?? "http://localhost:8080"
+  const token = process.env.AGENT_HUB_TOKEN ?? ""
+
+  const payload = JSON.stringify({
+    session_id: sid,
+    cwd: process.cwd(),
+    status,
+    waiting_reason: opts?.waitingReason ?? null,
+    display_name: opts?.displayName ?? null,
+    editor_type: "opencode",
+  })
+
+  log("INFO ", "spawnStatusReport", { sid, status })
+
+  const proc = spawn(
+    bin,
+    ["status-report", "--server", server, "--token", token],
+    { stdio: ["pipe", "ignore", "pipe"] },
+  )
+
+  proc.stdin.end(payload)
+  proc.stderr?.on("data", (chunk: Buffer) => {
+    log("INFO ", "status-report stderr", { output: chunk.toString().trim() })
+  })
+  proc.on("error", (err: Error) => {
+    log("WARN ", "status report spawn failed", { err: err.message })
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Single-pattern gateway call
 // ---------------------------------------------------------------------------
 
@@ -105,7 +195,7 @@ async function callGateway(sid: string, payload: object): Promise<GatewayResult>
   const token = process.env.AGENT_HUB_TOKEN
   const config = process.env.AGENT_HUB_CONFIG
 
-  const args: string[] = ["--opencode"]
+  const args: string[] = ["approval", "--opencode"]
   args.push("--server", server ?? "http://localhost:8080")
   args.push("--token", token ?? "")
   if (config) args.push("--config", config)
@@ -259,6 +349,15 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
 
       const tool = PERM_TO_TOOL[info.permission] ?? info.permission
       const sid = info.sessionID
+
+      // First tool call for this session — immediately register it on the
+      // server so it shows up in the session list right away, rather than
+      // waiting for a debounced session.status event or an approval escalation.
+      if (!registeredSessions.has(sid)) {
+        registeredSessions.add(sid)
+        spawnStatusReport(sid, "active")
+      }
+
       log("INFO ", "about to call fetchTitle", { sid, tool })
       const title = await fetchTitle(client, sid, directory)
       log("INFO ", "fetchTitle returned", { sid, title: title ?? "(none)" })
@@ -356,11 +455,25 @@ const server: Plugin = async (input: PluginInput): Promise<Hooks> => {
     },
 
     event: async ({ event }) => {
-      if (event.type !== "session.error") return
-      const props = event.properties as { sessionID?: string; error?: { name: string } }
-      if (props.error?.name !== "MessageAbortedError") return
-      const sid = props.sessionID
-      if (sid) killGateways(sid)
+      // session.status — map opencode statuses to agent-hub statuses
+      if (event.type === "session.status") {
+        const sid = event.properties.sessionID
+        // opencode emits "idle", "busy", "retry"; map to agent-hub terms
+        const mapped = event.properties.status.type === "idle" ? "idle" as const : "active" as const
+        reportStatus(sid, mapped)
+        return
+      }
+
+      // session.error — abort / error; kill gateways and report ended
+      if (event.type === "session.error") {
+        if (event.properties.error?.name !== "MessageAbortedError") return
+        const sid = event.properties.sessionID
+        if (sid) {
+          registeredSessions.delete(sid)
+          killGateways(sid)
+          reportStatus(sid, "ended")
+        }
+      }
     },
   }
 }

@@ -33,7 +33,10 @@ use hooks::PendingNotifications;
 use notifier::Notifier;
 use oauth::OAuthManager;
 use presence::{Presence, PresenceUpdate};
-use sessions::{SessionApprovalMode, SessionConfigUpdate, SessionRegistry};
+use sessions::{
+    EffectiveSessionStatus, SessionApprovalMode, SessionConfigUpdate, SessionRegistry,
+    SessionStatus,
+};
 
 pub struct AppState<N: Notifier> {
     pub config: Arc<ServerConfig>,
@@ -64,6 +67,7 @@ impl<N: Notifier> Clone for AppState<N> {
 pub fn router<N: Notifier>(state: AppState<N>) -> Router {
     let mcp_service = mcp::service(
         Arc::clone(&state.sessions),
+        Arc::clone(&state.approvals),
         Arc::clone(&state.notify_config),
         Arc::clone(&state.presence),
     );
@@ -72,6 +76,7 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
         .route("/hooks/stop", post(hooks::stop::<N>))
         .route("/hooks/notification", post(hooks::notification::<N>))
         .route("/hooks/session-end", post(hooks::session_end::<N>))
+        .route("/hooks/status", post(hooks::status::<N>))
         .route("/presence", post(handle_presence_update::<N>))
         .route("/sessions", get(handle_list_sessions::<N>))
         .route("/sessions/{id}", put(handle_update_session::<N>))
@@ -152,6 +157,72 @@ async fn health() -> &'static str {
     "ok"
 }
 
+/// Resolve the effective status for a session by combining its stored status
+/// with server-side knowledge (pending approvals).
+pub(crate) fn resolve_effective_status(
+    stored: SessionStatus,
+    waiting_reason: Option<&str>,
+    pending_approval: Option<&approvals::Approval>,
+) -> EffectiveSessionStatus {
+    if stored == SessionStatus::Ended {
+        return EffectiveSessionStatus::Ended;
+    }
+    // Pending approvals always win — they're actionable in the UI
+    if let Some(approval) = pending_approval {
+        let input_str = approval.tool_input.to_string();
+        let truncated = if input_str.len() > 60 {
+            let end = input_str
+                .char_indices()
+                .nth(60)
+                .map_or(input_str.len(), |(i, _)| i);
+            format!("{}...", &input_str[..end])
+        } else {
+            input_str
+        };
+        let reason = format!("Pending approval: {} — {}", approval.tool_name, truncated);
+        return EffectiveSessionStatus::Waiting {
+            reason: Some(reason),
+        };
+    }
+    // Client-reported waiting
+    if stored == SessionStatus::Waiting {
+        return EffectiveSessionStatus::Waiting {
+            reason: waiting_reason.map(|s| s.to_string()),
+        };
+    }
+    match stored {
+        SessionStatus::Active => EffectiveSessionStatus::Active,
+        SessionStatus::Idle => EffectiveSessionStatus::Idle,
+        _ => unreachable!(),
+    }
+}
+
+/// Build a list of SessionViews with effective status resolved.
+async fn build_session_views<N: Notifier>(state: &AppState<N>) -> Vec<sessions::SessionView> {
+    let raw = state.sessions.list().await;
+    let mut views = Vec::with_capacity(raw.len());
+    for s in raw {
+        let pending = state
+            .approvals
+            .first_pending_for_session(&s.session_id)
+            .await;
+        let status = resolve_effective_status(
+            s.stored_status,
+            s.waiting_reason.as_deref(),
+            pending.as_ref(),
+        );
+        views.push(sessions::SessionView {
+            session_id: s.session_id,
+            project: s.project,
+            config: s.config,
+            editor_type: s.editor_type,
+            status,
+            display_name: s.display_name,
+        });
+    }
+    views
+}
+
 async fn handle_presence_update<N: Notifier>(
     axum::extract::State(state): axum::extract::State<AppState<N>>,
     Json(body): Json<PresenceUpdate>,
@@ -164,7 +235,7 @@ async fn handle_presence_update<N: Notifier>(
 async fn handle_list_sessions<N: Notifier>(
     axum::extract::State(state): axum::extract::State<AppState<N>>,
 ) -> Json<Vec<sessions::SessionView>> {
-    Json(state.sessions.list().await)
+    Json(build_session_views(&state).await)
 }
 
 async fn handle_update_session<N: Notifier>(

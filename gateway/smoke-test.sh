@@ -24,7 +24,7 @@ run() {
     local expect_value="$5"   # expected string value
 
     local stdout stderr exit_code
-    stdout=$(echo "$payload" | timeout 5 "$BIN" "$provider_flag" --server "$SERVER" --token "$TOKEN" --config "$CONFIG" 2>/tmp/smoke-stderr) || exit_code=$?
+    stdout=$(echo "$payload" | timeout 5 "$BIN" approval "$provider_flag" --server "$SERVER" --token "$TOKEN" --config "$CONFIG" 2>/tmp/smoke-stderr) || exit_code=$?
     exit_code=${exit_code:-0}
     stderr=$(cat /tmp/smoke-stderr)
 
