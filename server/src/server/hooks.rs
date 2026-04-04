@@ -5,27 +5,18 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use capabilities::ApprovalContext;
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+// Re-export protocol types used by this module.
+use protocol::SessionStatus;
+pub use protocol::{ApprovalRequest, ApprovalResponse, HookPayload, StatusReport};
+
 use super::AppState;
 use super::approvals;
-use super::approvals::ApprovalStatus;
 use super::notifier::Notifier;
-use super::sessions::{EditorType, SessionStatus};
 use crate::server::presence::PresenceState;
-
-/// Common fields from hook payloads. Serde ignores unknown fields by default.
-#[derive(Deserialize)]
-pub struct HookPayload {
-    pub session_id: Option<String>,
-    pub cwd: Option<String>,
-    pub message: Option<String>,
-    pub editor_type: Option<EditorType>,
-}
 
 /// Tracks pending delayed notifications so they can be cancelled.
 pub struct PendingNotifications {
@@ -201,30 +192,6 @@ fn extract_session(payload: &HookPayload) -> Option<(String, String)> {
     }
 }
 
-/// Request body for POST /api/v1/hooks/approval
-#[derive(Deserialize)]
-pub struct ApprovalRequest {
-    pub id: String,
-    pub session_id: String,
-    pub session_display_name: String,
-    pub cwd: String,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    /// Provider identifier: "claude-code" | "cursor" | "opencode"
-    pub provider: String,
-    /// Request type: "tool_use" (Phase 2 will add "plan_question")
-    pub request_type: String,
-    pub context: ApprovalContext,
-}
-
-/// Response for POST /hooks/approval
-#[derive(Serialize)]
-pub struct ApprovalResponse {
-    pub id: uuid::Uuid,
-    #[serde(flatten)]
-    pub status: ApprovalStatus,
-}
-
 /// POST /api/v1/hooks/approval — register a pending approval request.
 pub async fn approval<N: Notifier>(
     State(state): State<AppState<N>>,
@@ -250,7 +217,7 @@ pub async fn approval<N: Notifier>(
             session_id: req.session_id,
             session_display_name: req.session_display_name,
             project: project.clone(),
-            tool_name: req.tool_name.clone(),
+            tool: req.tool.clone(),
             tool_input: req.tool_input.clone(),
             provider: req.provider,
             request_type: req.request_type,
@@ -267,7 +234,7 @@ pub async fn approval<N: Notifier>(
         let title = "Agent Hub (approval)".to_string();
         let message = format!(
             "[{project}] {} — {}",
-            req.tool_name,
+            req.tool,
             truncate_input(&req.tool_input)
         );
         tokio::spawn(async move {
@@ -289,17 +256,6 @@ fn truncate_input(input: &serde_json::Value) -> String {
     } else {
         s
     }
-}
-
-/// Request body for POST /api/v1/hooks/status
-#[derive(Deserialize)]
-pub struct StatusReport {
-    pub session_id: String,
-    pub cwd: String,
-    pub status: SessionStatus,
-    pub waiting_reason: Option<String>,
-    pub display_name: Option<String>,
-    pub editor_type: Option<EditorType>,
 }
 
 /// POST /api/v1/hooks/status — report session status from a client.
@@ -340,6 +296,7 @@ async fn fire_and_forget<N: Notifier>(notifier: &N, title: &str, message: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::EditorType;
 
     /// Verify that the exact JSON the opencode plugin sends deserializes correctly.
     /// This is the payload from spawnStatusReport() in agent-hub.ts.
@@ -357,10 +314,7 @@ mod tests {
             serde_json::from_str(json).expect("opencode status report should deserialize");
         assert_eq!(report.session_id, "ses_abc123");
         assert_eq!(report.status, SessionStatus::Idle);
-        assert_eq!(
-            report.editor_type,
-            Some(super::super::sessions::EditorType::Opencode)
-        );
+        assert_eq!(report.editor_type, Some(EditorType::Opencode));
     }
 
     /// Verify that a status report with editor_type omitted still works

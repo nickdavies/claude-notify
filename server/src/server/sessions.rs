@@ -2,40 +2,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::info;
 
+// Re-export protocol types so existing `use super::sessions::X` imports work.
+pub use protocol::{
+    EditorType, EffectiveSessionStatus, SessionApprovalMode, SessionConfigUpdate,
+    SessionNotifyConfig, SessionStatus, SessionView,
+};
+
 use super::storage::PersistedSession;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorType {
-    Claude,
-    Cursor,
-    Opencode,
-    #[default]
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionStatus {
-    #[default]
-    Active,
-    Idle,
-    Waiting,
-    Ended,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "status")]
-pub enum EffectiveSessionStatus {
-    Active,
-    Idle,
-    Waiting { reason: Option<String> },
-    Ended,
-}
 
 pub struct SessionInner {
     pub project: String,
@@ -48,67 +24,8 @@ pub struct SessionInner {
     pub ended_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum SessionApprovalMode {
-    #[default]
-    Remote,
-    Terminal,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SessionNotifyConfig {
-    pub stop_enabled: bool,
-    pub permission_enabled: bool,
-    #[serde(default)]
-    pub approval_mode: SessionApprovalMode,
-}
-
-impl SessionNotifyConfig {
-    pub fn with_default_approval_mode(mode: SessionApprovalMode) -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            approval_mode: mode,
-        }
-    }
-}
-
-impl Default for SessionNotifyConfig {
-    fn default() -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            approval_mode: SessionApprovalMode::default(),
-        }
-    }
-}
-
-/// Partial update for per-session config.
-#[derive(Deserialize)]
-pub struct SessionConfigUpdate {
-    pub stop_enabled: Option<bool>,
-    pub permission_enabled: Option<bool>,
-    pub approval_mode: Option<SessionApprovalMode>,
-}
-
-impl SessionNotifyConfig {
-    pub fn apply(&mut self, update: &SessionConfigUpdate) {
-        if let Some(v) = update.stop_enabled {
-            self.stop_enabled = v;
-        }
-        if let Some(v) = update.permission_enabled {
-            self.permission_enabled = v;
-        }
-        if let Some(v) = update.approval_mode {
-            self.approval_mode = v;
-        }
-    }
-}
-
 /// Raw session data for internal use (before effective status resolution).
-#[derive(Clone, Serialize)]
+#[derive(Clone, serde::Serialize)]
 pub struct RawSessionView {
     pub session_id: String,
     pub project: String,
@@ -116,17 +33,6 @@ pub struct RawSessionView {
     pub editor_type: EditorType,
     pub stored_status: SessionStatus,
     pub waiting_reason: Option<String>,
-    pub display_name: Option<String>,
-}
-
-/// API response for a session (with effective status resolved).
-#[derive(Clone, Serialize)]
-pub struct SessionView {
-    pub session_id: String,
-    pub project: String,
-    pub config: SessionNotifyConfig,
-    pub editor_type: EditorType,
-    pub status: EffectiveSessionStatus,
     pub display_name: Option<String>,
 }
 

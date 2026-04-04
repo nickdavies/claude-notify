@@ -1,8 +1,10 @@
 use std::env;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+
+// Re-export protocol types so existing `use super::config::X` imports work.
+pub use protocol::{NotifyConfig, NotifyConfigUpdate};
 
 use super::sessions::SessionApprovalMode;
 use crate::error::AppError;
@@ -140,45 +142,6 @@ fn parse_tokens(raw: &str) -> Result<Vec<Token>, AppError> {
             }
         })
         .collect()
-}
-
-/// Runtime-mutable notification config.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NotifyConfig {
-    pub stop_enabled: bool,
-    pub permission_enabled: bool,
-    /// Delay in seconds before sending permission notifications (0 = immediate).
-    pub notification_delay_secs: u64,
-}
-
-impl NotifyConfig {
-    pub fn with_delay(delay_secs: u64) -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            notification_delay_secs: delay_secs,
-        }
-    }
-
-    pub fn apply(&mut self, update: NotifyConfigUpdate) {
-        if let Some(v) = update.stop_enabled {
-            self.stop_enabled = v;
-        }
-        if let Some(v) = update.permission_enabled {
-            self.permission_enabled = v;
-        }
-        if let Some(v) = update.notification_delay_secs {
-            self.notification_delay_secs = v;
-        }
-    }
-}
-
-/// Partial update for NotifyConfig.
-#[derive(Deserialize)]
-pub struct NotifyConfigUpdate {
-    pub stop_enabled: Option<bool>,
-    pub permission_enabled: Option<bool>,
-    pub notification_delay_secs: Option<u64>,
 }
 
 /// Shared mutable notify config.

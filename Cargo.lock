@@ -7,11 +7,11 @@ name = "agent-hub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "capabilities",
  "chrono",
  "clap",
  "config",
  "crossterm",
+ "protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -29,6 +29,7 @@ dependencies = [
  "capabilities",
  "clap",
  "config",
+ "protocol",
  "reqwest",
  "serde",
  "serde_json",
@@ -49,6 +50,7 @@ dependencies = [
  "chrono",
  "clap",
  "openidconnect",
+ "protocol",
  "reqwest",
  "rmcp",
  "serde",
@@ -363,6 +365,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "capabilities"
 version = "0.1.0"
 dependencies = [
+ "protocol",
  "serde",
  "serde_json",
 ]
@@ -1717,6 +1720,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2164,6 +2178,7 @@ dependencies = [
  "schemars_derive",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -7,12 +7,12 @@ use serde::Deserialize;
 use tower_sessions::Session;
 use uuid::Uuid;
 
+use protocol::{Approval, SessionView};
+
 use super::AppState;
-use super::approvals::Approval;
 use super::config::ApprovalFeatureMode;
 use super::notifier::Notifier;
 use super::oauth;
-use super::sessions::SessionView;
 
 // --- Templates ---
 

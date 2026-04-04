@@ -1,15 +1,9 @@
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PresenceState {
-    Present,
-    Idle,
-    Away,
-}
+// Re-export protocol types so existing `use super::presence::X` imports work.
+pub use protocol::{PresenceState, PresenceUpdate};
 
 struct PresenceInner {
     state: PresenceState,
@@ -52,12 +46,6 @@ impl Presence {
         inner.state = state;
         inner.updated_at = Instant::now();
     }
-}
-
-/// Request body for POST /presence.
-#[derive(Deserialize)]
-pub struct PresenceUpdate {
-    pub state: PresenceState,
 }
 
 #[cfg(test)]

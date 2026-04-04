@@ -4,10 +4,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::approvals::Approval;
-use super::config::NotifyConfig;
-use super::presence::PresenceState;
-use super::sessions::{EditorType, SessionNotifyConfig, SessionStatus};
+use protocol::{
+    Approval, EditorType, NotifyConfig, PresenceState, SessionNotifyConfig, SessionStatus,
+};
 
 /// Serializable snapshot of server state that survives restarts.
 #[derive(Serialize, Deserialize)]

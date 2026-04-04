@@ -1,46 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use capabilities::ApprovalContext;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use tokio::sync::{RwLock, watch};
 use tokio::time::Instant;
 use tracing::info;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Approval {
-    pub id: Uuid,
-    pub request_id: String,
-    pub session_id: String,
-    pub session_display_name: String,
-    pub project: String,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    /// Provider that originated this approval request (e.g. "claude-code", "cursor", "opencode").
-    pub provider: String,
-    /// Request type; currently always "tool_use". "plan_question" is Phase 2.
-    pub request_type: String,
-    pub context: ApprovalContext,
-    pub created_at: DateTime<Utc>,
-    pub status: ApprovalStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ApprovalStatus {
-    Pending,
-    Approved { message: Option<String> },
-    Denied { reason: String },
-    Cancelled,
-}
-
-impl ApprovalStatus {
-    pub fn is_resolved(&self) -> bool {
-        !matches!(self, ApprovalStatus::Pending)
-    }
-}
+// Re-export protocol types so existing `use super::approvals::X` imports work.
+pub use protocol::{Approval, ApprovalContext, ApprovalStatus};
 
 struct ApprovalEntry {
     approval: Approval,
@@ -63,7 +31,7 @@ pub struct RegisterApproval {
     pub session_id: String,
     pub session_display_name: String,
     pub project: String,
-    pub tool_name: String,
+    pub tool: protocol::Tool,
     pub tool_input: serde_json::Value,
     pub provider: String,
     pub request_type: String,
@@ -99,7 +67,7 @@ impl ApprovalRegistry {
             session_id: params.session_id.clone(),
             session_display_name: params.session_display_name,
             project: params.project,
-            tool_name: params.tool_name,
+            tool: params.tool,
             tool_input: params.tool_input,
             provider: params.provider,
             request_type: params.request_type,

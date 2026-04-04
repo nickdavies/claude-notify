@@ -1,56 +1,13 @@
-// --- Canonical hook event representation ---
+//! Provider capability flags and trait.
+//!
+//! This crate defines the `Provider` trait and the boolean capability flags
+//! that describe what each agent-coding-tool provider supports. The trait is
+//! intentionally minimal today; it will grow as provider-specific behaviour
+//! (e.g. rich context, plan-mode questions) is wired up.
 
-/// Internal canonical representation of a hook input event.
-/// All provider-specific wire formats are parsed into this before any rule evaluation.
-pub struct ToolHookEvent {
-    pub session_id: String,
-    pub session_display_name: String,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    pub cwd: String,
-    pub workspace_roots: Vec<String>,
-    pub hook_event_name: String,
-}
-
-// --- Decision types ---
-
-#[derive(Debug, Clone)]
-pub enum DecisionStatus {
-    Approved,
-    Denied,
-    DeniedWithReason(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct HookDecision {
-    pub status: DecisionStatus,
-    pub message: Option<String>,
-}
-
-// --- Approval context (sent to server and review CLI) ---
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ApprovalContext {
-    /// Workspace roots known to the provider at hook time.
-    pub workspace_roots: Vec<String>,
-    /// The provider hook event name (e.g. "PreToolUse", "preToolUse", "tool.execute.before").
-    pub hook_event_name: String,
-    /// Per-tool opaque blob; rendered as JSON in the web UI, diff view for FileWrite tools.
-    pub extra: Option<serde_json::Value>,
-}
-
-// --- Parse error ---
-
-#[derive(Debug)]
-pub struct ParseError(pub String);
-
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for ParseError {}
+// Re-export commonly used protocol types for convenience.
+pub use protocol::ApprovalContext;
+pub use protocol::Tool;
 
 // --- Provider capabilities and trait ---
 
@@ -69,12 +26,58 @@ pub trait Provider: Send + Sync + 'static {
     /// Short identifier used on the --flag and in log/server output.
     fn name(&self) -> &'static str;
 
-    /// Parse the raw stdin JSON into a canonical ToolHookEvent.
-    /// Also responsible for normalising tool names via the tool registry.
-    fn parse_input(&self, raw: &str) -> Result<ToolHookEvent, ParseError>;
-
-    /// Serialise a canonical HookDecision into the provider's wire format (stdout JSON).
-    fn format_output(&self, event: &ToolHookEvent, decision: HookDecision) -> String;
-
     fn capabilities(&self) -> &ProviderCapabilities;
+}
+
+// --- Known providers ---
+
+pub struct ClaudeCode;
+
+impl Provider for ClaudeCode {
+    fn name(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &ProviderCapabilities {
+            inline_approval: true,
+            agent_ui_prompt: false,
+            plan_questions: false,
+            rich_context: true,
+        }
+    }
+}
+
+pub struct Cursor;
+
+impl Provider for Cursor {
+    fn name(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &ProviderCapabilities {
+            inline_approval: true,
+            agent_ui_prompt: false,
+            plan_questions: false,
+            rich_context: false,
+        }
+    }
+}
+
+pub struct Opencode;
+
+impl Provider for Opencode {
+    fn name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn capabilities(&self) -> &ProviderCapabilities {
+        &ProviderCapabilities {
+            inline_approval: false,
+            agent_ui_prompt: true,
+            plan_questions: false,
+            rich_context: false,
+        }
+    }
 }

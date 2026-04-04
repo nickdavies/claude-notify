@@ -10,11 +10,13 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::{ServerHandler, tool_handler, tool_router};
 use serde::Serialize;
 
+use protocol::{PresenceState, SessionConfigUpdate, SessionView};
+
 use crate::server::approvals::ApprovalRegistry;
 use crate::server::config::SharedNotifyConfig;
-use crate::server::presence::{Presence, PresenceState};
+use crate::server::presence::Presence;
 use crate::server::resolve_effective_status;
-use crate::server::sessions::{SessionConfigUpdate, SessionRegistry};
+use crate::server::sessions::SessionRegistry;
 
 #[derive(Clone)]
 pub struct NotifyMcp {
@@ -115,7 +117,7 @@ impl NotifyMcp {
                 s.waiting_reason.as_deref(),
                 pending.as_ref(),
             );
-            views.push(crate::server::sessions::SessionView {
+            views.push(SessionView {
                 session_id: s.session_id,
                 project: s.project,
                 config: s.config,

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::expand_tilde;
-use crate::tools::{expand_tool_group, get_matchable_args, is_in_workspace, is_path_tool};
+use crate::tools::{expand_tool_group, is_in_workspace, is_path_tool};
 
 // --- JSON deserialization types ---
 
@@ -69,23 +69,13 @@ pub(crate) struct ToolMatcher {
 }
 
 impl ToolMatcher {
-    fn matches(
-        &self,
-        tool_name: &str,
-        tool_input: Option<&serde_json::Value>,
-        cwd: Option<&str>,
-    ) -> bool {
+    fn matches(&self, tool_name: &str, resolved_args: &[String]) -> bool {
         if self.name != tool_name {
             return false;
         }
         match &self.pattern {
             None => true,
-            Some(pattern) => {
-                let args = tool_input
-                    .map(|input| get_matchable_args(tool_name, input, cwd))
-                    .unwrap_or_default();
-                args.iter().any(|value| pattern.is_match(value))
-            }
+            Some(pattern) => resolved_args.iter().any(|value| pattern.is_match(value)),
         }
     }
 }
@@ -105,12 +95,22 @@ pub struct ToolConfig {
     rules: Vec<Rule>,
 }
 
+/// The three possible local decisions from config rule evaluation.
+/// Also the only outcomes a delegate subprocess can return (never another delegation).
 #[derive(Debug)]
-pub enum ResolvedAction {
+pub enum ConfigDecision {
     Allow,
     Deny(Option<String>),
     Ask,
-    Delegate(String),
+}
+
+/// Result of resolving a tool call against the config rules.
+#[derive(Debug)]
+pub enum ConfigAction {
+    /// A decision that can be acted on directly.
+    Decision(ConfigDecision),
+    /// Delegate to an external subprocess for the decision.
+    Delegation(String),
 }
 
 /// Parse a tool entry like "Write", "Write(src/**)", or "Write(regex:\.env)".
@@ -233,23 +233,22 @@ pub fn load_tool_config(path: &str) -> Result<ToolConfig, String> {
 pub fn resolve_action(
     config: &ToolConfig,
     tool_name: &str,
-    tool_input: Option<&serde_json::Value>,
+    resolved_args: &[String],
     cwd: Option<&str>,
     workspace_roots: Option<&[String]>,
-) -> ResolvedAction {
-    // For path-based tools, resolve paths and deny if any is not absolute
-    let resolved_paths: Vec<String> = if is_path_tool(tool_name) {
-        tool_input
-            .map(|input| get_matchable_args(tool_name, input, cwd))
-            .unwrap_or_default()
+) -> ConfigAction {
+    // For path-based tools, resolved_args should already contain resolved paths.
+    // Deny if any path is not absolute (caller must resolve relative paths first).
+    let resolved_paths: &[String] = if is_path_tool(tool_name) {
+        resolved_args
     } else {
-        vec![]
+        &[]
     };
 
     if resolved_paths.iter().any(|p| !p.starts_with('/')) {
-        return ResolvedAction::Deny(Some(
+        return ConfigAction::Decision(ConfigDecision::Deny(Some(
             "path-based tool arguments must be absolute paths".to_string(),
-        ));
+        )));
     }
 
     // Pre-compute workspace membership (None if no paths or no workspace_roots).
@@ -295,17 +294,19 @@ pub fn resolve_action(
         if rule
             .matchers
             .iter()
-            .any(|m| m.matches(tool_name, tool_input, cwd))
+            .any(|m| m.matches(tool_name, resolved_args))
         {
             eprintln!(
                 "agent-hub-gateway: [debug] matched rule[{i}]: {}",
                 rule.source_json
             );
             return match &rule.action {
-                RuleAction::Allow => ResolvedAction::Allow,
-                RuleAction::Deny => ResolvedAction::Deny(rule.message.clone()),
-                RuleAction::Ask => ResolvedAction::Ask,
-                RuleAction::Delegate => ResolvedAction::Delegate(rule.command.clone().unwrap()),
+                RuleAction::Allow => ConfigAction::Decision(ConfigDecision::Allow),
+                RuleAction::Deny => {
+                    ConfigAction::Decision(ConfigDecision::Deny(rule.message.clone()))
+                }
+                RuleAction::Ask => ConfigAction::Decision(ConfigDecision::Ask),
+                RuleAction::Delegate => ConfigAction::Delegation(rule.command.clone().unwrap()),
             };
         }
     }
@@ -313,11 +314,11 @@ pub fn resolve_action(
     default_to_resolved(&config.default)
 }
 
-pub fn default_to_resolved(default: &DefaultAction) -> ResolvedAction {
+pub fn default_to_resolved(default: &DefaultAction) -> ConfigAction {
     match default {
-        DefaultAction::Allow => ResolvedAction::Allow,
-        DefaultAction::Deny => ResolvedAction::Deny(None),
-        DefaultAction::Ask => ResolvedAction::Ask,
+        DefaultAction::Allow => ConfigAction::Decision(ConfigDecision::Allow),
+        DefaultAction::Deny => ConfigAction::Decision(ConfigDecision::Deny(None)),
+        DefaultAction::Ask => ConfigAction::Decision(ConfigDecision::Ask),
     }
 }
 
@@ -462,64 +463,55 @@ mod tests {
     #[test]
     fn bare_name_matches_any_input() {
         let m = parse_tool_entry("Write").unwrap();
-        let input = serde_json::json!({"path": "/any/path"});
-        assert!(m.matches("Write", Some(&input), None));
-        assert!(m.matches("Write", None, None));
+        assert!(m.matches("Write", &["/any/path".to_string()]));
+        assert!(m.matches("Write", &[]));
     }
 
     #[test]
     fn bare_name_rejects_wrong_tool() {
         let m = parse_tool_entry("Write").unwrap();
-        assert!(!m.matches("Read", None, None));
+        assert!(!m.matches("Read", &[]));
     }
 
     #[test]
     fn glob_matches_path() {
         let m = parse_tool_entry("Write(/src/**)").unwrap();
-        let yes = serde_json::json!({"path": "/src/foo/bar.rs"});
-        let no = serde_json::json!({"path": "/tests/foo.rs"});
-        assert!(m.matches("Write", Some(&yes), None));
-        assert!(!m.matches("Write", Some(&no), None));
+        assert!(m.matches("Write", &["/src/foo/bar.rs".to_string()]));
+        assert!(!m.matches("Write", &["/tests/foo.rs".to_string()]));
     }
 
     #[test]
     fn glob_no_input_is_no_match() {
         let m = parse_tool_entry("Write(/src/**)").unwrap();
-        assert!(!m.matches("Write", None, None));
+        assert!(!m.matches("Write", &[]));
     }
 
     #[test]
     fn glob_missing_field_is_no_match() {
         let m = parse_tool_entry("Write(/src/**)").unwrap();
-        let input = serde_json::json!({"other_field": "/src/foo.rs"});
-        assert!(!m.matches("Write", Some(&input), None));
+        // No matchable args extracted — pattern can't match
+        assert!(!m.matches("Write", &[]));
     }
 
     #[test]
     fn regex_matches_path() {
         let m = parse_tool_entry(r"Write(regex:\.env)").unwrap();
-        let yes = serde_json::json!({"path": "/home/user/.env"});
-        let no = serde_json::json!({"path": "/src/main.rs"});
-        assert!(m.matches("Write", Some(&yes), None));
-        assert!(!m.matches("Write", Some(&no), None));
+        assert!(m.matches("Write", &["/home/user/.env".to_string()]));
+        assert!(!m.matches("Write", &["/src/main.rs".to_string()]));
     }
 
     #[test]
     fn glob_matches_command_field() {
         let m = parse_tool_entry("Bash(npm *)").unwrap();
-        let yes = serde_json::json!({"command": "npm test"});
-        let no = serde_json::json!({"command": "cargo test"});
-        assert!(m.matches("Bash", Some(&yes), None));
-        assert!(!m.matches("Bash", Some(&no), None));
+        assert!(m.matches("Bash", &["npm test".to_string()]));
+        assert!(!m.matches("Bash", &["cargo test".to_string()]));
     }
 
     #[test]
     fn glob_matches_url_field() {
         let m = parse_tool_entry("WebFetch(https://example.com/**)").unwrap();
-        let yes = serde_json::json!({"url": "https://example.com/page"});
-        let no = serde_json::json!({"url": "https://other.com/page"});
-        assert!(m.matches("WebFetch", Some(&yes), None));
-        assert!(!m.matches("WebFetch", Some(&no), None));
+        assert!(m.matches("WebFetch", &["https://example.com/page".to_string()]));
+        assert!(!m.matches("WebFetch", &["https://other.com/page".to_string()]));
     }
 
     // --- resolve_action (end-to-end) ---
@@ -587,16 +579,19 @@ mod tests {
             DefaultAction::Ask,
         );
 
-        let env = serde_json::json!({"path": "/config/.env.local"});
-        let normal = serde_json::json!({"path": "/src/main.rs"});
-
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&env), None, None),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Write",
+                &["/config/.env.local".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&normal), None, None),
-            ResolvedAction::Allow
+            resolve_action(&config, "Write", &["/src/main.rs".to_string()], None, None),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -607,8 +602,8 @@ mod tests {
             DefaultAction::Ask,
         );
         assert!(matches!(
-            resolve_action(&config, "Read", None, None, None),
-            ResolvedAction::Ask
+            resolve_action(&config, "Read", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -619,16 +614,16 @@ mod tests {
             DefaultAction::Ask,
         );
         assert!(matches!(
-            resolve_action(&config, "Read", None, None, None),
-            ResolvedAction::Allow
+            resolve_action(&config, "Read", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Grep", None, None, None),
-            ResolvedAction::Allow
+            resolve_action(&config, "Grep", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Write", None, None, None),
-            ResolvedAction::Ask
+            resolve_action(&config, "Write", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -641,10 +636,10 @@ mod tests {
             ],
             DefaultAction::Ask,
         );
-        // No tool_input: pattern rule can't match, falls through to bare "Write" -> Deny
+        // No resolved_args: pattern rule can't match, falls through to bare "Write" -> Deny
         assert!(matches!(
-            resolve_action(&config, "Write", None, None, None),
-            ResolvedAction::Deny(_)
+            resolve_action(&config, "Write", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -656,9 +651,15 @@ mod tests {
             vec![make_rule(&["Read"], RuleAction::Allow)],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "relative/path.txt"});
-        match resolve_action(&config, "Read", Some(&input), None, None) {
-            ResolvedAction::Deny(Some(msg)) => {
+        // Caller passes unresolved relative path (no cwd to resolve against)
+        match resolve_action(
+            &config,
+            "Read",
+            &["relative/path.txt".to_string()],
+            None,
+            None,
+        ) {
+            ConfigAction::Decision(ConfigDecision::Deny(Some(msg))) => {
                 assert!(
                     msg.contains("absolute"),
                     "expected absolute path error: {msg}"
@@ -674,16 +675,16 @@ mod tests {
             vec![make_rule(&["Read"], RuleAction::Allow)],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "src/main.rs"});
+        // Caller has already resolved "src/main.rs" against cwd "/home/user/project"
         assert!(matches!(
             resolve_action(
                 &config,
                 "Read",
-                Some(&input),
+                &["/home/user/project/src/main.rs".to_string()],
                 Some("/home/user/project"),
                 None
             ),
-            ResolvedAction::Allow
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -693,20 +694,30 @@ mod tests {
             vec![make_rule(&["Bash"], RuleAction::Allow)],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"command": "ls relative/path"});
         assert!(matches!(
-            resolve_action(&config, "Bash", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Bash",
+                &["ls relative/path".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
     #[test]
     fn absolute_path_check_not_applied_to_unknown_tools() {
         let config = make_config(vec![], DefaultAction::Allow);
-        let input = serde_json::json!({"whatever": "relative/path"});
         assert!(matches!(
-            resolve_action(&config, "UnknownTool", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "UnknownTool",
+                &["relative/path".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -718,8 +729,8 @@ mod tests {
             vec![make_deny_rule(&["Delete"], "Use trash instead of delete")],
             DefaultAction::Ask,
         );
-        match resolve_action(&config, "Delete", None, None, None) {
-            ResolvedAction::Deny(Some(msg)) => {
+        match resolve_action(&config, "Delete", &[], None, None) {
+            ConfigAction::Decision(ConfigDecision::Deny(Some(msg))) => {
                 assert_eq!(msg, "Use trash instead of delete");
             }
             other => panic!("expected Deny with message, got {other:?}"),
@@ -733,8 +744,8 @@ mod tests {
             DefaultAction::Ask,
         );
         assert!(matches!(
-            resolve_action(&config, "Delete", None, None, None),
-            ResolvedAction::Deny(None)
+            resolve_action(&config, "Delete", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Deny(None))
         ));
     }
 
@@ -742,8 +753,8 @@ mod tests {
     fn deny_default_has_no_message() {
         let config = make_config(vec![], DefaultAction::Deny);
         assert!(matches!(
-            resolve_action(&config, "Write", None, None, None),
-            ResolvedAction::Deny(None)
+            resolve_action(&config, "Write", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Deny(None))
         ));
     }
 
@@ -758,11 +769,16 @@ mod tests {
             ],
             DefaultAction::Ask,
         );
-        // Relative path "id_rsa" with cwd ~/.ssh -> resolved to /home/user/.ssh/id_rsa
-        let input = serde_json::json!({"path": "id_rsa"});
+        // Caller resolved "id_rsa" with cwd ~/.ssh -> /home/user/.ssh/id_rsa
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), Some("/home/user/.ssh"), None),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/.ssh/id_rsa".to_string()],
+                Some("/home/user/.ssh"),
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -828,7 +844,7 @@ mod tests {
     fn expand_shell_group() {
         let tools = vec!["@shell".to_string()];
         let expanded = expand_tools(&tools, None).unwrap();
-        assert_eq!(expanded, vec!["Bash", "Shell"]);
+        assert_eq!(expanded, vec!["Bash"]);
     }
 
     #[test]
@@ -888,20 +904,37 @@ mod tests {
             DefaultAction::Ask,
         );
 
-        let ssh_input = serde_json::json!({"path": "/home/user/.ssh/id_rsa"});
-        let normal_input = serde_json::json!({"path": "/home/user/project/main.rs"});
-
-        match resolve_action(&config, "Read", Some(&ssh_input), None, None) {
-            ResolvedAction::Deny(Some(msg)) => assert!(msg.contains(".ssh")),
+        match resolve_action(
+            &config,
+            "Read",
+            &["/home/user/.ssh/id_rsa".to_string()],
+            None,
+            None,
+        ) {
+            ConfigAction::Decision(ConfigDecision::Deny(Some(msg))) => {
+                assert!(msg.contains(".ssh"))
+            }
             other => panic!("expected Deny for .ssh read, got {other:?}"),
         }
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&ssh_input), None, None),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Write",
+                &["/home/user/.ssh/id_rsa".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&normal_input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/project/main.rs".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -918,11 +951,16 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"path": "/home/user/project/src/main.rs"});
 
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/project/src/main.rs".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -937,11 +975,16 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"path": "/etc/passwd"});
 
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, Some(&roots)),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Read",
+                &["/etc/passwd".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -956,16 +999,25 @@ mod tests {
         );
         let roots = vec!["/home/user/project".to_string()];
 
-        let outside = serde_json::json!({"path": "/tmp/scratch.txt"});
-        let inside = serde_json::json!({"path": "/home/user/project/src/main.rs"});
-
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&outside), None, Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Write",
+                &["/tmp/scratch.txt".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&inside), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Write",
+                &["/home/user/project/src/main.rs".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -980,12 +1032,11 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"command": "ls"});
 
         // Can't determine workspace membership for Bash, workspace rule skipped, falls to default
         assert!(matches!(
-            resolve_action(&config, "Bash", Some(&input), None, Some(&roots)),
-            ResolvedAction::Deny(_)
+            resolve_action(&config, "Bash", &["ls".to_string()], None, Some(&roots)),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -999,12 +1050,17 @@ mod tests {
             )],
             DefaultAction::Deny,
         );
-        let input = serde_json::json!({"path": "/home/user/project/src/main.rs"});
 
         // No workspace_roots provided, workspace rule skipped, falls to default
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/project/src/main.rs".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -1020,21 +1076,35 @@ mod tests {
         );
         let roots = vec!["/home/user/project".to_string()];
 
-        let git_file = serde_json::json!({"path": "/home/user/project/.git/config"});
-        let src_file = serde_json::json!({"path": "/home/user/project/src/main.rs"});
-        let outside = serde_json::json!({"path": "/tmp/scratch.txt"});
-
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&git_file), None, Some(&roots)),
-            ResolvedAction::Deny(_)
+            resolve_action(
+                &config,
+                "Write",
+                &["/home/user/project/.git/config".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&src_file), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Write",
+                &["/home/user/project/src/main.rs".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Write", Some(&outside), None, Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Write",
+                &["/tmp/scratch.txt".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1050,18 +1120,17 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"path": "../.ssh/id_rsa"});
 
-        // With cwd inside workspace, ../ resolves outside => not in workspace => denied
+        // Caller resolved "../.ssh/id_rsa" with cwd /home/user/project -> /home/user/.ssh/id_rsa
         assert!(matches!(
             resolve_action(
                 &config,
                 "Read",
-                Some(&input),
+                &["/home/user/.ssh/id_rsa".to_string()],
                 Some("/home/user/project"),
                 Some(&roots)
             ),
-            ResolvedAction::Deny(_)
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -1078,16 +1147,25 @@ mod tests {
         );
         let roots = vec!["/home/user/project".to_string()];
 
-        let inside = serde_json::json!({"pattern": "TODO", "path": "/home/user/project/src"});
-        let outside = serde_json::json!({"pattern": "secret", "path": "/home/user/.ssh"});
-
         assert!(matches!(
-            resolve_action(&config, "Grep", Some(&inside), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Grep",
+                &["/home/user/project/src".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Grep", Some(&outside), None, Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Grep",
+                &["/home/user/.ssh".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1101,12 +1179,11 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"pattern": "TODO"});
 
         // No path arg AND no cwd means no workspace determination, both rules skipped
         assert!(matches!(
-            resolve_action(&config, "Grep", Some(&input), None, Some(&roots)),
-            ResolvedAction::Deny(_)
+            resolve_action(&config, "Grep", &[], None, Some(&roots)),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -1120,24 +1197,23 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"pattern": "TODO"});
 
         // No path arg but cwd is inside workspace => falls back to cwd
         assert!(matches!(
             resolve_action(
                 &config,
                 "Grep",
-                Some(&input),
+                &[],
                 Some("/home/user/project"),
                 Some(&roots)
             ),
-            ResolvedAction::Allow
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
 
         // No path arg but cwd is outside workspace
         assert!(matches!(
-            resolve_action(&config, "Grep", Some(&input), Some("/tmp"), Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(&config, "Grep", &[], Some("/tmp"), Some(&roots)),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1152,14 +1228,19 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({
-            "query": "auth",
-            "target_directories": ["/home/user/project/src", "/home/user/project/lib"]
-        });
 
         assert!(matches!(
-            resolve_action(&config, "SemanticSearch", Some(&input), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "SemanticSearch",
+                &[
+                    "/home/user/project/src".to_string(),
+                    "/home/user/project/lib".to_string()
+                ],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -1173,15 +1254,20 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({
-            "query": "secrets",
-            "target_directories": ["/home/user/project/src", "/home/user/.ssh"]
-        });
 
         // One dir outside workspace => not in_workspace => Ask
         assert!(matches!(
-            resolve_action(&config, "SemanticSearch", Some(&input), None, Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "SemanticSearch",
+                &[
+                    "/home/user/project/src".to_string(),
+                    "/home/user/.ssh".to_string()
+                ],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1196,12 +1282,11 @@ mod tests {
             DefaultAction::Deny,
         );
         let roots = vec!["/home/user/project".to_string()];
-        let input = serde_json::json!({"query": "auth", "target_directories": []});
 
         // Empty dirs = can't determine workspace, rule skipped
         assert!(matches!(
-            resolve_action(&config, "SemanticSearch", Some(&input), None, Some(&roots)),
-            ResolvedAction::Deny(_)
+            resolve_action(&config, "SemanticSearch", &[], None, Some(&roots)),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -1232,10 +1317,15 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "/home/user/oss/cilium/main.go"});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/oss/cilium/main.go".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -1249,11 +1339,10 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "/etc/passwd"});
         // Rule skipped, falls to default Ask
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Ask
+            resolve_action(&config, "Read", &["/etc/passwd".to_string()], None, None),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1267,10 +1356,9 @@ mod tests {
             DefaultAction::Ask,
         );
         // No path field in input — can't check in_paths, rule skipped, falls to next rule
-        let input = serde_json::json!({"other": "value"});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Deny(_)
+            resolve_action(&config, "Read", &[], None, None),
+            ConfigAction::Decision(ConfigDecision::Deny(_))
         ));
     }
 
@@ -1284,13 +1372,18 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({
-            "query": "auth",
-            "target_directories": ["/home/user/oss/cilium/src", "/home/user/oss/linux/net"]
-        });
         assert!(matches!(
-            resolve_action(&config, "SemanticSearch", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "SemanticSearch",
+                &[
+                    "/home/user/oss/cilium/src".to_string(),
+                    "/home/user/oss/linux/net".to_string()
+                ],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -1304,13 +1397,18 @@ mod tests {
             DefaultAction::Deny,
         );
         // One dir inside in_paths, one not — rule skipped, falls to next rule (Ask)
-        let input = serde_json::json!({
-            "query": "secrets",
-            "target_directories": ["/home/user/oss/cilium/src", "/home/user/.ssh"]
-        });
         assert!(matches!(
-            resolve_action(&config, "SemanticSearch", Some(&input), None, None),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "SemanticSearch",
+                &[
+                    "/home/user/oss/cilium/src".to_string(),
+                    "/home/user/.ssh".to_string()
+                ],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1324,20 +1422,35 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let oss = serde_json::json!({"path": "/home/user/oss/cilium/main.go"});
-        let ws = serde_json::json!({"path": "/home/user/workspaces/project/src/lib.rs"});
-        let other = serde_json::json!({"path": "/home/user/.ssh/id_rsa"});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&oss), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/oss/cilium/main.go".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&ws), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/workspaces/project/src/lib.rs".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&other), None, None),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/.ssh/id_rsa".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1358,25 +1471,30 @@ mod tests {
         );
         let roots = vec!["/home/user/oss/cilium".to_string()];
 
-        // Inside workspace AND inside in_paths → Allow
-        let inside_in_paths = serde_json::json!({"path": "/home/user/oss/cilium/main.go"});
-        assert!(matches!(
-            resolve_action(&config, "Read", Some(&inside_in_paths), None, Some(&roots)),
-            ResolvedAction::Allow
-        ));
-
-        // Inside workspace but NOT inside in_paths → rule skipped → Ask
-        let inside_not_in_paths =
-            serde_json::json!({"path": "/home/user/oss/cilium/../other/secret.txt"});
+        // Inside workspace AND inside in_paths -> Allow
         assert!(matches!(
             resolve_action(
                 &config,
                 "Read",
-                Some(&inside_not_in_paths),
+                &["/home/user/oss/cilium/main.go".to_string()],
                 None,
                 Some(&roots)
             ),
-            ResolvedAction::Ask
+            ConfigAction::Decision(ConfigDecision::Allow)
+        ));
+
+        // Inside workspace but NOT inside in_paths -> rule skipped -> Ask
+        // /home/user/oss/cilium/../other/secret.txt normalises to /home/user/oss/other/secret.txt
+        // which IS inside /home/user/oss. Use a path truly outside in_paths:
+        assert!(matches!(
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/other/secret.txt".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
@@ -1400,10 +1518,9 @@ mod tests {
             DefaultAction::Ask,
         );
         let path = format!("{home}/oss/cilium/main.go");
-        let input = serde_json::json!({"path": path});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(&config, "Read", &[path], None, None),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -1418,16 +1535,22 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "/home/user/oss-other/main.go"});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/oss-other/main.go".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
     #[test]
     fn in_paths_dotdot_traversal_blocked() {
         // /home/user/oss/../unsafe normalises to /home/user/unsafe — must NOT match in_paths /home/user/oss
+        // Caller is responsible for normalizing paths before passing them
         let config = make_config(
             vec![make_in_paths_rule(
                 &["Read"],
@@ -1436,16 +1559,23 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "/home/user/oss/../unsafe/secret.txt"});
+        // Caller has already normalized: /home/user/oss/../unsafe/secret.txt -> /home/user/unsafe/secret.txt
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/unsafe/secret.txt".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 
     #[test]
     fn in_paths_dotdot_within_dir_allowed() {
         // /home/user/oss/cilium/../linux is still inside /home/user/oss — should be allowed
+        // Caller has normalized: /home/user/oss/cilium/../linux/net/core.c -> /home/user/oss/linux/net/core.c
         let config = make_config(
             vec![make_in_paths_rule(
                 &["Read"],
@@ -1454,10 +1584,15 @@ mod tests {
             )],
             DefaultAction::Ask,
         );
-        let input = serde_json::json!({"path": "/home/user/oss/cilium/../linux/net/core.c"});
         assert!(matches!(
-            resolve_action(&config, "Read", Some(&input), None, None),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Read",
+                &["/home/user/oss/linux/net/core.c".to_string()],
+                None,
+                None
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
     }
 
@@ -1472,17 +1607,25 @@ mod tests {
         );
         let roots = vec!["/home/user/project".to_string()];
 
-        let inside = serde_json::json!({"glob_pattern": "*.rs", "target_directory": "/home/user/project/src"});
-        let outside =
-            serde_json::json!({"glob_pattern": "id_*", "target_directory": "/home/user/.ssh"});
-
         assert!(matches!(
-            resolve_action(&config, "Glob", Some(&inside), None, Some(&roots)),
-            ResolvedAction::Allow
+            resolve_action(
+                &config,
+                "Glob",
+                &["/home/user/project/src".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Allow)
         ));
         assert!(matches!(
-            resolve_action(&config, "Glob", Some(&outside), None, Some(&roots)),
-            ResolvedAction::Ask
+            resolve_action(
+                &config,
+                "Glob",
+                &["/home/user/.ssh".to_string()],
+                None,
+                Some(&roots)
+            ),
+            ConfigAction::Decision(ConfigDecision::Ask)
         ));
     }
 }

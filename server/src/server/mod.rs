@@ -17,7 +17,6 @@ use std::time::Duration;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_sessions::{MemoryStore, SessionManagerLayer};
 use uuid::Uuid;
@@ -33,9 +32,12 @@ use hooks::PendingNotifications;
 use notifier::Notifier;
 use oauth::OAuthManager;
 use presence::{Presence, PresenceUpdate};
-use sessions::{
-    EffectiveSessionStatus, SessionApprovalMode, SessionConfigUpdate, SessionRegistry,
-    SessionStatus,
+use sessions::{EffectiveSessionStatus, SessionConfigUpdate, SessionRegistry, SessionStatus};
+
+// Import protocol types used directly in this module's handlers.
+use protocol::{
+    ApprovalDecision, ApprovalModeResponse, ApprovalResolveRequest, ApprovalWaitResponse,
+    ConfigResponse,
 };
 
 pub struct AppState<N: Notifier> {
@@ -179,7 +181,7 @@ pub(crate) fn resolve_effective_status(
         } else {
             input_str
         };
-        let reason = format!("Pending approval: {} — {}", approval.tool_name, truncated);
+        let reason = format!("Pending approval: {} — {}", approval.tool, truncated);
         return EffectiveSessionStatus::Waiting {
             reason: Some(reason),
         };
@@ -251,13 +253,6 @@ async fn handle_update_session<N: Notifier>(
         .map(Json)
 }
 
-#[derive(serde::Serialize)]
-struct ConfigResponse {
-    #[serde(flatten)]
-    notify: NotifyConfig,
-    presence: presence::PresenceState,
-}
-
 async fn handle_get_config<N: Notifier>(
     axum::extract::State(state): axum::extract::State<AppState<N>>,
 ) -> Json<ConfigResponse> {
@@ -295,12 +290,6 @@ async fn handle_get_approval<N: Notifier>(
         .await
         .ok_or_else(|| AppError::ApprovalNotFound(id.to_string()))
         .map(Json)
-}
-
-#[derive(Serialize)]
-struct ApprovalWaitResponse {
-    #[serde(flatten)]
-    status: ApprovalStatus,
 }
 
 /// GET /api/v1/approvals/{id}/wait — long-poll for approval decision (55s timeout).
@@ -346,20 +335,6 @@ async fn handle_approval_wait<N: Notifier>(
     }
 }
 
-#[derive(Deserialize)]
-struct ApprovalResolveRequest {
-    decision: ApprovalDecision,
-    message: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ApprovalDecision {
-    Approve,
-    Deny,
-    Cancel,
-}
-
 /// POST /api/v1/approvals/{id}/resolve — approve/deny/cancel an approval.
 async fn handle_approval_resolve<N: Notifier>(
     axum::extract::State(state): axum::extract::State<AppState<N>>,
@@ -382,11 +357,6 @@ async fn handle_approval_resolve<N: Notifier>(
         .await
         .ok_or_else(|| AppError::ApprovalNotFound(id.to_string()))
         .map(Json)
-}
-
-#[derive(Serialize)]
-struct ApprovalModeResponse {
-    approval_mode: SessionApprovalMode,
 }
 
 /// GET /api/v1/sessions/{id}/approval-mode
@@ -461,6 +431,7 @@ mod integration_tests {
     use axum::http::{Request, StatusCode as AxumStatus};
     use config::{ApprovalFeatureMode, AuthMode, ServerConfig};
     use notifier::NullNotifier;
+    use sessions::SessionApprovalMode;
     use tower::ServiceExt; // for oneshot
 
     /// Build a test router with auth disabled (no Bearer tokens needed).
@@ -524,7 +495,11 @@ mod integration_tests {
             }"#,
         )
         .await;
-        assert_eq!(status, AxumStatus::OK, "opencode status report should be accepted");
+        assert_eq!(
+            status,
+            AxumStatus::OK,
+            "opencode status report should be accepted"
+        );
     }
 
     #[tokio::test]
@@ -706,7 +681,11 @@ mod integration_tests {
                 .unwrap();
             (s, String::from_utf8(b.to_vec()).unwrap())
         };
-        assert_eq!(status, AxumStatus::OK, "approval should be registered: {body}");
+        assert_eq!(
+            status,
+            AxumStatus::OK,
+            "approval should be registered: {body}"
+        );
 
         // Session should now show as "waiting" due to pending approval
         let (_, body) = get_json(&app, "/api/v1/sessions").await;

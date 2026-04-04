@@ -1,28 +1,10 @@
 use std::time::Duration;
 
-use capabilities::ApprovalContext;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use protocol::{ApprovalDecision, ApprovalResolveRequest};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Approval {
-    pub id: Uuid,
-    #[allow(dead_code)]
-    pub session_id: String,
-    pub session_display_name: String,
-    pub project: String,
-    pub tool_name: String,
-    pub tool_input: serde_json::Value,
-    pub context: ApprovalContext,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Serialize)]
-struct ResolveRequest {
-    decision: &'static str,
-    message: Option<String>,
-}
+// Re-export Approval so existing `use crate::client::Approval` imports work.
+pub use protocol::Approval;
 
 pub struct Client {
     http: reqwest::Client,
@@ -67,23 +49,23 @@ impl Client {
     }
 
     pub async fn approve(&self, id: Uuid, message: Option<String>) -> Result<(), String> {
-        self.resolve(id, "approve", message).await
+        self.resolve(id, ApprovalDecision::Approve, message).await
     }
 
     pub async fn deny(&self, id: Uuid, reason: Option<String>) -> Result<(), String> {
-        self.resolve(id, "deny", reason).await
+        self.resolve(id, ApprovalDecision::Deny, reason).await
     }
 
     async fn resolve(
         &self,
         id: Uuid,
-        decision: &'static str,
+        decision: ApprovalDecision,
         message: Option<String>,
     ) -> Result<(), String> {
         let url = format!("{}/api/v1/approvals/{}/resolve", self.base_url, id);
         let req = self
             .auth(self.http.post(&url))
-            .json(&ResolveRequest { decision, message });
+            .json(&ApprovalResolveRequest { decision, message });
         let resp = req
             .send()
             .await

@@ -95,12 +95,6 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         fields: &["command"],
         array_field: None,
     },
-    ToolDef {
-        name: "Shell",
-        category: ToolCategory::Shell,
-        fields: &["command"],
-        array_field: None,
-    },
     // Other (has arg extraction but not in a file/shell group)
     ToolDef {
         name: "WebFetch",
@@ -146,15 +140,6 @@ pub fn is_in_workspace(path: &str, workspace_roots: &[String]) -> bool {
         let root = root.trim_end_matches('/');
         path == root || path.starts_with(&format!("{root}/"))
     })
-}
-
-/// Map a provider-native tool name to its canonical name.
-/// For providers that use Claude Code tool names natively, the map is empty and names pass through.
-pub fn normalise_tool_name<'a>(name: &'a str, map: &[(&'static str, &'static str)]) -> &'a str {
-    map.iter()
-        .find(|(native, _)| *native == name)
-        .map(|(_, canonical)| *canonical)
-        .unwrap_or(name)
 }
 
 /// Normalize a path by resolving `.` and `..` segments without filesystem access.
@@ -256,7 +241,6 @@ mod tests {
     fn matchable_arg_shell() {
         let input = serde_json::json!({"command": "ls -la"});
         assert_eq!(get_matchable_args("Bash", &input, None), vec!["ls -la"]);
-        assert_eq!(get_matchable_args("Shell", &input, None), vec!["ls -la"]);
     }
 
     #[test]

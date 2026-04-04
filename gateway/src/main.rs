@@ -1,19 +1,20 @@
 mod providers;
+mod types;
 
 use std::io::Read;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use capabilities::{ApprovalContext, DecisionStatus, HookDecision, Provider, ToolHookEvent};
 use clap::{Args, Parser, Subcommand};
-use config::{
-    ResolvedAction, ToolCategory, default_to_resolved, expand_tilde, find_tool_def,
-    load_tool_config, resolve_action,
+use config::{ConfigAction, expand_tilde, load_tool_config, resolve_action};
+use protocol::{
+    ApprovalContext, ApprovalRequest, ApprovalResponse, ApprovalStatus, ApprovalWaitResponse,
+    ExtraContext, StatusReport, ToolCallKind,
 };
-use providers::{claude_code::ClaudeCode, cursor::Cursor, opencode::Opencode};
-use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use uuid::Uuid;
+
+use types::{DecisionStatus, HookDecision, HookOutput, ParseError, ToolHookEvent};
 
 /// Agent Hub gateway — provider-agnostic tool approval hook.
 ///
@@ -78,77 +79,6 @@ struct StatusReportArgs {
     token: String,
 }
 
-// --- Server wire types ---
-
-#[derive(Serialize)]
-struct ApprovalRequest {
-    id: String,
-    session_id: String,
-    session_display_name: String,
-    cwd: String,
-    tool_name: String,
-    tool_input: serde_json::Value,
-    provider: String,
-    request_type: &'static str,
-    context: ApprovalContext,
-}
-
-#[derive(Deserialize)]
-struct ApprovalResponse {
-    id: Uuid,
-    #[serde(rename = "type")]
-    status_type: String,
-    message: Option<String>,
-    reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WaitResponse {
-    #[serde(rename = "type")]
-    status_type: String,
-    message: Option<String>,
-    reason: Option<String>,
-}
-
-// --- Delegate subprocess result ---
-
-/// Canonical payload sent to delegate subprocesses (e.g. Dippy).
-///
-/// Always serialised as Claude Code's wire format so delegates only need to
-/// understand one format regardless of which provider the hook came from.
-/// The delegate should be invoked with `--claude` (or equivalent).
-#[derive(Serialize)]
-struct DelegatePayload<'a> {
-    tool_name: &'a str,
-    tool_input: &'a serde_json::Value,
-    cwd: &'a str,
-    hook_event_name: &'a str,
-}
-
-impl<'a> DelegatePayload<'a> {
-    fn from_event(event: &'a ToolHookEvent) -> Self {
-        // Delegates always receive Claude Code format. Normalise shell tool names to
-        // "Bash" so delegates only need to handle one shell tool name.
-        let tool_name = match find_tool_def(&event.tool_name) {
-            Some(def) if matches!(def.category, ToolCategory::Shell) => "Bash",
-            _ => &event.tool_name,
-        };
-        Self {
-            tool_name,
-            tool_input: &event.tool_input,
-            cwd: &event.cwd,
-            hook_event_name: &event.hook_event_name,
-        }
-    }
-}
-
-struct DelegateResult {
-    /// "allow", "deny", "ask", or None if output couldn't be parsed
-    permission: Option<String>,
-    /// Reason text from permissionDecisionReason (Dippy) or equivalent field.
-    reason: Option<String>,
-}
-
 // --- Entrypoint ---
 
 enum RunError {
@@ -169,21 +99,76 @@ async fn main() -> ExitCode {
 }
 
 async fn run_approval(args: ApprovalArgs) -> ExitCode {
-    let provider: Box<dyn Provider> = if args.claude {
-        Box::new(ClaudeCode)
+    if args.claude {
+        run_hook::<protocol::ClaudeCodeHookInput>(
+            args,
+            "claude-code",
+            providers::claude_code::format_output,
+        )
+        .await
     } else if args.cursor {
-        Box::new(Cursor)
+        run_hook::<protocol::CursorHookInput>(args, "cursor", providers::cursor::format_output)
+            .await
     } else if args.opencode {
-        Box::new(Opencode)
+        run_hook::<protocol::OpenCodeHookInput>(
+            args,
+            "opencode",
+            providers::opencode::format_output,
+        )
+        .await
     } else {
         eprintln!("agent-hub-gateway: one of --claude, --cursor, or --opencode is required");
+        ExitCode::from(2)
+    }
+}
+
+/// Generic hook handler: read stdin, deserialize to a provider-specific input type,
+/// convert to canonical ToolHookEvent, run the rule engine + approval flow, then
+/// format the decision back into the provider's output wire format.
+async fn run_hook<I>(
+    args: ApprovalArgs,
+    provider_name: &str,
+    format_output: fn(&ToolHookEvent, &HookOutput) -> String,
+) -> ExitCode
+where
+    I: serde::de::DeserializeOwned + TryInto<ToolHookEvent, Error = ParseError>,
+{
+    let mut raw = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
+        eprintln!("agent-hub-gateway: failed to read stdin: {e}");
         return ExitCode::from(2);
+    }
+
+    let event = match parse_input::<I>(&raw) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("agent-hub-gateway: failed to parse hook payload: {e}");
+            return ExitCode::from(2);
+        }
     };
+
+    eprintln!(
+        "[info] tool={} session={} cwd={}",
+        event.tool_call.tool_name(),
+        event.session_id,
+        event.cwd
+    );
 
     let config_path = expand_tilde(&args.config);
 
-    match run(&args, &*provider, &config_path).await {
-        Ok(()) => ExitCode::SUCCESS,
+    match run(&args, provider_name, &event, &config_path).await {
+        Ok(decision) => {
+            eprintln!(
+                "[info] final decision for tool={}: {:?}",
+                event.tool_call.tool_name(),
+                decision.status
+            );
+            // If the provider cannot block inline, the server was notified for
+            // observability but the agent will proceed regardless.
+            let output = format_output(&event, &decision);
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
         Err(RunError::ServerUnreachable(e)) => {
             eprintln!("agent-hub-gateway: {e}");
             ExitCode::from(1)
@@ -195,6 +180,17 @@ async fn run_approval(args: ApprovalArgs) -> ExitCode {
     }
 }
 
+/// Deserialize raw JSON into a provider-specific input type, then convert to
+/// the canonical ToolHookEvent.
+fn parse_input<I>(raw: &str) -> Result<ToolHookEvent, ParseError>
+where
+    I: serde::de::DeserializeOwned + TryInto<ToolHookEvent, Error = ParseError>,
+{
+    let input: I =
+        serde_json::from_str(raw).map_err(|e| ParseError(format!("invalid JSON: {e}")))?;
+    input.try_into()
+}
+
 async fn run_status_report(args: StatusReportArgs) -> ExitCode {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
@@ -202,11 +198,14 @@ async fn run_status_report(args: StatusReportArgs) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Validate it's valid JSON (basic sanity check)
-    if let Err(e) = serde_json::from_str::<serde_json::Value>(&input) {
-        eprintln!("agent-hub-gateway: invalid JSON: {e}");
-        return ExitCode::from(2);
-    }
+    // Typed deserialization — catches schema mismatches at the gateway
+    let report: StatusReport = match serde_json::from_str(&input) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("agent-hub-gateway: invalid status report JSON: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let client = reqwest::Client::new();
     let url = format!("{}/api/v1/hooks/status", args.server.trim_end_matches('/'));
@@ -214,8 +213,7 @@ async fn run_status_report(args: StatusReportArgs) -> ExitCode {
     match client
         .post(&url)
         .bearer_auth(&args.token)
-        .header("content-type", "application/json")
-        .body(input)
+        .json(&report)
         .timeout(Duration::from_secs(10))
         .send()
         .await
@@ -235,149 +233,103 @@ async fn run_status_report(args: StatusReportArgs) -> ExitCode {
     }
 }
 
+// --- Core approval logic ---
+
 async fn run(
     args: &ApprovalArgs,
-    provider: &dyn Provider,
+    provider_name: &str,
+    event: &ToolHookEvent,
     config_path: &str,
-) -> Result<(), RunError> {
-    let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
-        .map_err(|e| RunError::FailClosed(format!("failed to read stdin: {e}")))?;
-
-    let event = provider
-        .parse_input(&input)
-        .map_err(|e| RunError::FailClosed(format!("failed to parse hook payload: {e}")))?;
-
-    eprintln!(
-        "[info] tool={} session={} cwd={}",
-        event.tool_name, event.session_id, event.cwd
-    );
-
+) -> Result<HookOutput, RunError> {
     let config = load_tool_config(config_path).map_err(RunError::FailClosed)?;
+
+    // Extract matchable args from the typed tool call and resolve paths.
+    let resolved_args: Vec<String> = event
+        .tool_call
+        .matchable_args()
+        .iter()
+        .map(|a| config::resolve_path(a, event.tool_call.tool_name(), Some(&event.cwd)))
+        .collect();
 
     let action = resolve_action(
         &config,
-        &event.tool_name,
-        Some(&event.tool_input),
+        event.tool_call.tool_name(),
+        &resolved_args,
         Some(&event.cwd),
         Some(&event.workspace_roots),
     );
 
     eprintln!("[info] resolved action: {:?}", action);
 
-    let decision = match action {
-        ResolvedAction::Allow => {
-            eprintln!("[info] allowing tool={}", event.tool_name);
-            HookDecision {
+    // Resolve config action (+ optional delegation) to a HookDecision.
+    let hook_decision = match action {
+        ConfigAction::Decision(d) => {
+            let hd = HookDecision::from(d);
+            eprintln!("[info] config decision: {:?}", hd);
+            hd
+        }
+        ConfigAction::Delegation(ref command) => {
+            eprintln!(
+                "[info] delegating tool={} to: {}",
+                event.tool_call.tool_name(),
+                command
+            );
+            let delegate_payload: protocol::DelegatePayload = event.into();
+            let delegate_input = serde_json::to_string(&delegate_payload).map_err(|e| {
+                RunError::FailClosed(format!("failed to serialise delegate payload: {e}"))
+            })?;
+            let hd = spawn_delegate(command, &delegate_input)
+                .await
+                .map_err(RunError::FailClosed)?;
+            eprintln!("[info] delegate returned: {:?}", hd);
+            hd
+        }
+    };
+
+    // Act on the decision.
+    let output = match hook_decision {
+        HookDecision::Allow => {
+            eprintln!("[info] allowing tool={}", event.tool_call.tool_name());
+            HookOutput {
                 status: DecisionStatus::Approved,
                 message: None,
             }
         }
-        ResolvedAction::Deny(msg) => {
-            eprintln!("[info] denying tool={} reason={:?}", event.tool_name, msg);
-            HookDecision {
-                status: match msg {
-                    Some(m) => DecisionStatus::DeniedWithReason(m),
+        HookDecision::Deny(reason) => {
+            eprintln!(
+                "[info] denying tool={} reason={:?}",
+                event.tool_call.tool_name(),
+                reason
+            );
+            HookOutput {
+                status: match reason {
+                    Some(r) => DecisionStatus::DeniedWithReason(r),
                     None => DecisionStatus::Denied,
                 },
                 message: None,
             }
         }
-        ResolvedAction::Ask => {
+        HookDecision::Ask(delegate_reason) => {
             eprintln!(
                 "[info] escalating tool={} to server for human approval",
-                event.tool_name
+                event.tool_call.tool_name()
             );
-            let extra = collect_extra(&event.tool_name, &event.tool_input, None);
-            escalate_to_server(args, provider, &event, extra).await?
-        }
-        ResolvedAction::Delegate(ref command) => {
-            eprintln!("[info] delegating tool={} to: {}", event.tool_name, command);
-            let delegate_input = serde_json::to_string(&DelegatePayload::from_event(&event))
-                .map_err(|e| {
-                    RunError::FailClosed(format!("failed to serialise delegate payload: {e}"))
-                })?;
-            let result = spawn_delegate(command, &delegate_input)
-                .await
-                .map_err(RunError::FailClosed)?;
-            eprintln!(
-                "[info] delegate returned: permission={:?} reason={:?}",
-                result.permission, result.reason
-            );
-            match result.permission.as_deref() {
-                Some("allow") => HookDecision {
-                    status: DecisionStatus::Approved,
-                    message: None,
-                },
-                Some("deny") => HookDecision {
-                    status: DecisionStatus::Denied,
-                    message: None,
-                },
-                Some("ask") => {
-                    // Delegate wants human review; escalate with original input for context
-                    eprintln!(
-                        "[info] delegate requested human review, escalating tool={} to server",
-                        event.tool_name
-                    );
-                    let extra = collect_extra(
-                        &event.tool_name,
-                        &event.tool_input,
-                        result.reason.as_deref(),
-                    );
-                    escalate_to_server(args, provider, &event, extra).await?
-                }
-                _ => {
-                    // Delegate returned nothing parseable; fall back to config default
-                    eprintln!(
-                        "[warn] delegate returned unrecognised permission={:?}, falling back to config default={:?}",
-                        result.permission, config.default
-                    );
-                    let fallback = default_to_resolved(&config.default);
-                    match fallback {
-                        ResolvedAction::Allow => HookDecision {
-                            status: DecisionStatus::Approved,
-                            message: None,
-                        },
-                        ResolvedAction::Deny(msg) => HookDecision {
-                            status: match msg {
-                                Some(m) => DecisionStatus::DeniedWithReason(m),
-                                None => DecisionStatus::Denied,
-                            },
-                            message: None,
-                        },
-                        ResolvedAction::Ask => {
-                            eprintln!(
-                                "[info] config default=ask, escalating tool={} to server",
-                                event.tool_name
-                            );
-                            let extra = collect_extra(&event.tool_name, &event.tool_input, None);
-                            escalate_to_server(args, provider, &event, extra).await?
-                        }
-                        ResolvedAction::Delegate(_) => unreachable!(),
-                    }
-                }
-            }
+            let extra = collect_extra(&event.tool_call, delegate_reason.as_deref());
+            escalate_to_server(args, provider_name, event, extra).await?
         }
     };
 
-    eprintln!(
-        "[info] final decision for tool={}: {:?}",
-        event.tool_name, decision.status
-    );
-
-    // If the provider cannot block inline, skip writing output for server-escalated denials —
-    // the server was notified for observability but the agent will proceed regardless.
-    let output = provider.format_output(&event, decision);
-    print!("{output}");
-    Ok(())
+    Ok(output)
 }
 
 /// Spawn a delegate subprocess, pipe the canonical delegate payload via stdin, and parse the result.
 ///
 /// The input is always in Claude Code wire format (see DelegatePayload), so delegates
 /// only need to understand one format regardless of which provider fired the hook.
-async fn spawn_delegate(command: &str, input: &str) -> Result<DelegateResult, String> {
+///
+/// Returns a `HookDecision` directly — the delegate's reason is placed on the
+/// appropriate variant (`Deny(reason)` or `Ask(reason)`).
+async fn spawn_delegate(command: &str, input: &str) -> Result<HookDecision, String> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     let (cmd, cmd_args) = parts.split_first().ok_or("empty delegate command")?;
 
@@ -403,10 +355,7 @@ async fn spawn_delegate(command: &str, input: &str) -> Result<DelegateResult, St
         .map_err(|e| format!("delegate command failed: {e}"))?;
 
     if output.status.code() == Some(2) {
-        return Ok(DelegateResult {
-            permission: Some("deny".to_string()),
-            reason: None,
-        });
+        return Ok(HookDecision::Deny(None));
     }
 
     if !output.status.success() {
@@ -416,28 +365,10 @@ async fn spawn_delegate(command: &str, input: &str) -> Result<DelegateResult, St
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| format!("delegate output is not valid UTF-8: {e}"))?;
 
-    let json: serde_json::Value = match serde_json::from_str(stdout.trim()) {
-        Ok(v) => v,
-        Err(_) => {
-            return Ok(DelegateResult {
-                permission: None,
-                reason: None,
-            });
-        }
-    };
+    let delegate_output: protocol::DelegateOutput = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("delegate returned invalid JSON: {e}"))?;
 
-    // Delegate always receives Claude Code format, so always parse hookSpecificOutput.
-    let permission = json
-        .get("hookSpecificOutput")
-        .and_then(|h| h.get("permissionDecision"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let reason = json
-        .get("hookSpecificOutput")
-        .and_then(|h| h.get("permissionDecisionReason"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    Ok(DelegateResult { permission, reason })
+    Ok(HookDecision::from(delegate_output))
 }
 
 /// Build the `extra` context blob that is sent to the server for human review.
@@ -446,69 +377,50 @@ async fn spawn_delegate(command: &str, input: &str) -> Result<DelegateResult, St
 /// what would change. For shell calls escalated by Dippy the delegate's reason
 /// is forwarded. All other tools return None.
 fn collect_extra(
-    tool_name: &str,
-    tool_input: &serde_json::Value,
+    tool_call: &protocol::ToolCall,
     dippy_reason: Option<&str>,
-) -> Option<serde_json::Value> {
-    match tool_name {
-        "Write" => {
-            let path = tool_input
-                .get("path")
-                .or_else(|| tool_input.get("file_path"))?
-                .as_str()?;
-            let new_content = tool_input.get("content")?.as_str()?;
+) -> Option<ExtraContext> {
+    match tool_call.kind() {
+        ToolCallKind::Write { path, content } => {
             let old_content = std::fs::read_to_string(path).unwrap_or_default();
-            let diff = make_unified_diff(&old_content, new_content, path);
-            Some(serde_json::json!({ "diff": diff }))
+            let diff = make_unified_diff(&old_content, content, path);
+            Some(ExtraContext::Diff { diff })
         }
-        "StrReplace" => {
-            let old = tool_input.get("old_string")?.as_str()?;
-            let new = tool_input.get("new_string")?.as_str()?;
-            let path = tool_input
-                .get("path")
-                .or_else(|| tool_input.get("file_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("file");
-            let diff = make_unified_diff(old, new, path);
-            Some(serde_json::json!({ "diff": diff }))
+        ToolCallKind::StrReplace {
+            path,
+            old_string,
+            new_string,
+        } => {
+            let label = path.as_deref().unwrap_or("file");
+            let diff = make_unified_diff(old_string, new_string, label);
+            Some(ExtraContext::Diff { diff })
         }
-        "Edit" => {
-            let old = tool_input.get("old_content")?.as_str()?;
-            let new = tool_input.get("new_content")?.as_str()?;
-            let path = tool_input
-                .get("path")
-                .or_else(|| tool_input.get("file_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("file");
-            let diff = make_unified_diff(old, new, path);
-            Some(serde_json::json!({ "diff": diff }))
+        ToolCallKind::Edit {
+            path,
+            old_content,
+            new_content,
+        } => {
+            let label = path.as_deref().unwrap_or("file");
+            let diff = make_unified_diff(old_content, new_content, label);
+            Some(ExtraContext::Diff { diff })
         }
-        "MultiEdit" => {
-            let path = tool_input
-                .get("path")
-                .or_else(|| tool_input.get("file_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("file");
-            let edits = tool_input.get("edits")?.as_array()?;
+        ToolCallKind::MultiEdit { path, edits } => {
+            let label = path.as_deref().unwrap_or("file");
             let combined: String = edits
                 .iter()
-                .filter_map(|edit| {
-                    let old = edit.get("old_string")?.as_str()?;
-                    let new = edit.get("new_string")?.as_str()?;
-                    Some(make_unified_diff(old, new, path))
-                })
+                .map(|edit| make_unified_diff(&edit.old_string, &edit.new_string, label))
                 .collect::<Vec<_>>()
                 .join("\n");
             if combined.is_empty() {
                 return None;
             }
-            Some(serde_json::json!({ "diff": combined }))
+            Some(ExtraContext::Diff { diff: combined })
         }
         _ => {
-            if let Some(reason) = dippy_reason {
-                return Some(serde_json::json!({ "dippy_reason": reason }));
-            }
-            None
+            let reason = dippy_reason?;
+            Some(ExtraContext::DippyReason {
+                dippy_reason: reason.to_string(),
+            })
         }
     }
 }
@@ -539,10 +451,10 @@ fn make_unified_diff(old: &str, new: &str, label: &str) -> String {
 /// POST an approval request to the server and long-poll until resolved.
 async fn escalate_to_server(
     args: &ApprovalArgs,
-    provider: &dyn Provider,
+    provider_name: &str,
     event: &ToolHookEvent,
-    extra: Option<serde_json::Value>,
-) -> Result<HookDecision, RunError> {
+    extra: Option<ExtraContext>,
+) -> Result<HookOutput, RunError> {
     let client = reqwest::Client::new();
     let base = args.server.trim_end_matches('/');
 
@@ -556,7 +468,8 @@ async fn escalate_to_server(
     let register_url = format!("{base}/api/v1/hooks/approval");
     eprintln!(
         "[info] registering approval request: tool={} session={}",
-        event.tool_name, event.session_id
+        event.tool_call.tool_name(),
+        event.session_id
     );
     let register_resp = client
         .post(&register_url)
@@ -566,10 +479,10 @@ async fn escalate_to_server(
             session_id: event.session_id.clone(),
             session_display_name: event.session_display_name.clone(),
             cwd: event.cwd.clone(),
-            tool_name: event.tool_name.clone(),
-            tool_input: event.tool_input.clone(),
-            provider: provider.name().to_string(),
-            request_type: "tool_use",
+            tool: event.tool_call.tool(),
+            tool_input: event.tool_call.raw_input().clone(),
+            provider: provider_name.to_string(),
+            request_type: "tool_use".to_string(),
             context,
         })
         .timeout(Duration::from_secs(10))
@@ -592,16 +505,14 @@ async fn escalate_to_server(
         RunError::ServerUnreachable(format!("failed to parse approval response: {e}"))
     })?;
 
-    if approval.status_type != "pending" {
+    if matches!(approval.status, ApprovalStatus::Pending) {
+        // Fall through to long-poll below
+    } else {
         eprintln!(
-            "[info] approval immediately resolved: status={}",
-            approval.status_type
+            "[info] approval immediately resolved: status={:?}",
+            approval.status
         );
-        return Ok(status_to_decision(
-            &approval.status_type,
-            approval.message,
-            approval.reason,
-        ));
+        return Ok(status_to_output(&approval.status));
     }
 
     // Long-poll until resolved or global timeout
@@ -639,7 +550,7 @@ async fn poll_for_decision(
     token: &str,
     deadline: tokio::time::Instant,
     timeout_secs: u64,
-) -> Result<HookDecision, RunError> {
+) -> Result<HookOutput, RunError> {
     let mut attempt: u32 = 0;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -703,7 +614,7 @@ async fn poll_for_decision(
             }
         };
 
-        let wait: WaitResponse = match serde_json::from_str(&body) {
+        let wait: ApprovalWaitResponse = match serde_json::from_str(&body) {
             Ok(w) => w,
             Err(e) => {
                 eprintln!(
@@ -714,7 +625,7 @@ async fn poll_for_decision(
             }
         };
 
-        if http_status.as_u16() == 202 || wait.status_type == "pending" {
+        if http_status.as_u16() == 202 || matches!(wait.status, ApprovalStatus::Pending) {
             let secs_remaining = remaining.as_secs();
             eprintln!(
                 "[info] approval still pending (attempt {attempt}, {secs_remaining}s remaining)"
@@ -723,12 +634,8 @@ async fn poll_for_decision(
             continue;
         }
 
-        eprintln!("[info] approval resolved: status={}", wait.status_type);
-        return Ok(status_to_decision(
-            &wait.status_type,
-            wait.message,
-            wait.reason,
-        ));
+        eprintln!("[info] approval resolved: status={:?}", wait.status);
+        return Ok(status_to_output(&wait.status));
     }
 }
 
@@ -753,25 +660,28 @@ async fn shutdown_signal() {
     }
 }
 
-fn status_to_decision(
-    status_type: &str,
-    message: Option<String>,
-    reason: Option<String>,
-) -> HookDecision {
-    match status_type {
-        "approved" => HookDecision {
+fn status_to_output(status: &ApprovalStatus) -> HookOutput {
+    match status {
+        ApprovalStatus::Approved { message } => HookOutput {
             status: DecisionStatus::Approved,
-            message,
+            message: message.clone(),
         },
-        _ => {
-            let r = reason.or(message);
-            HookDecision {
-                status: match r {
-                    Some(m) => DecisionStatus::DeniedWithReason(m),
-                    None => DecisionStatus::Denied,
-                },
-                message: None,
-            }
-        }
+        ApprovalStatus::Denied { reason } => HookOutput {
+            status: if reason.is_empty() {
+                DecisionStatus::Denied
+            } else {
+                DecisionStatus::DeniedWithReason(reason.clone())
+            },
+            message: None,
+        },
+        ApprovalStatus::Cancelled => HookOutput {
+            status: DecisionStatus::Denied,
+            message: None,
+        },
+        ApprovalStatus::Pending => HookOutput {
+            // Should not happen — but if we get here, deny as a safety net.
+            status: DecisionStatus::Denied,
+            message: None,
+        },
     }
 }

@@ -8,6 +8,7 @@ use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 
 use crate::client::Approval;
+use protocol::Tool;
 
 /// What the user wants to do after a UI event.
 pub enum Action {
@@ -278,7 +279,7 @@ impl Ui {
                     queue!(stdout, Print("  "))?;
                 }
 
-                let summary = format!("{} \u{203a} {}", approval.project, approval.tool_name);
+                let summary = format!("{} \u{203a} {}", approval.project, approval.tool);
                 let summary_pad = width.saturating_sub(summary.len() + age.len() + 4);
                 if is_selected {
                     queue!(
@@ -495,7 +496,7 @@ fn build_expanded_lines(
                 kind: LineKind::Normal,
             });
         }
-    } else if approval.tool_name == "Write" {
+    } else if approval.tool == Tool::Write {
         build_write_diff_lines(&approval.tool_input, max_line_width, &mut lines);
     } else {
         let input_str = format_tool_input(&approval.tool_input);
@@ -508,13 +509,11 @@ fn build_expanded_lines(
     }
 
     if let Some(extra) = &approval.context.extra {
-        let text = if let Some(reason) = extra
-            .get("dippy_reason")
-            .and_then(|v: &serde_json::Value| v.as_str())
-        {
-            format!("Dippy: {reason}")
-        } else {
-            format!("Context: {}", extra)
+        let text = match extra {
+            protocol::ExtraContext::DippyReason { dippy_reason } => {
+                format!("Dippy: {dippy_reason}")
+            }
+            protocol::ExtraContext::Diff { diff } => format!("Context: {diff}"),
         };
         lines.push(ExpandedLine {
             text: String::new(),

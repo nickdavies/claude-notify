@@ -2,12 +2,12 @@ mod rules;
 mod tools;
 
 pub use rules::{
-    DefaultAction, ResolvedAction, RuleAction, RuleSummary, ToolConfig, default_to_resolved,
-    load_tool_config, resolve_action, validate_tool_config,
+    ConfigAction, ConfigDecision, DefaultAction, RuleAction, RuleSummary, ToolConfig,
+    default_to_resolved, load_tool_config, resolve_action, validate_tool_config,
 };
 pub use tools::{
     TOOL_DEFS, ToolCategory, ToolDef, expand_tool_group, find_tool_def, get_matchable_args,
-    is_in_workspace, is_path_tool, normalise_tool_name, tools_in_category,
+    is_in_workspace, is_path_tool, resolve_path, tools_in_category,
 };
 
 /// Expand a leading `~/` to the user's home directory.
