@@ -5,7 +5,7 @@
 //! None of these types are shared with other crates.
 
 use config::ConfigDecision;
-use protocol::ToolCall;
+use protocol::{SessionId, ToolCall};
 
 // ===========================================================================
 // Canonical hook event
@@ -14,7 +14,7 @@ use protocol::ToolCall;
 /// Internal canonical representation of a hook input event.
 /// All provider-specific wire formats are parsed into this before any rule evaluation.
 pub struct ToolHookEvent {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub session_display_name: String,
     pub tool_call: ToolCall,
     pub cwd: String,
@@ -118,7 +118,7 @@ pub struct HookOutput {
 // ===========================================================================
 
 /// Build a human-readable display name from session ID and workspace roots.
-pub(crate) fn build_display_name(session_id: &str, roots: &[String]) -> String {
+pub(crate) fn build_display_name(session_id: &SessionId, roots: &[String]) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let normalize = |p: &str| -> String {
         if !home.is_empty() && p.starts_with(&home) {
@@ -128,7 +128,8 @@ pub(crate) fn build_display_name(session_id: &str, roots: &[String]) -> String {
         }
     };
 
-    let id_part = &session_id[..session_id.len().min(8)];
+    let id_str = session_id.as_str();
+    let id_part = &id_str[..id_str.len().min(8)];
 
     if roots.is_empty() {
         return format!("[{id_part}]");

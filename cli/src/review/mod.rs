@@ -7,11 +7,12 @@ use crossterm::event::Event;
 use uuid::Uuid;
 
 use crate::client::{Approval, Client};
+use protocol::Secret;
 use ui::{Action, DenyInputResult, Mode, Ui};
 
 pub async fn run(server: String, token: Option<String>, poll_interval: u64) -> anyhow::Result<()> {
     let server = server.trim_end_matches('/').to_string();
-    let client = Client::new(server.clone(), token);
+    let client = Client::new(server.clone(), token.map(Secret::new));
 
     // Health check before entering TUI
     client

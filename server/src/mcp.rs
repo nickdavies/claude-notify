@@ -10,7 +10,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::{ServerHandler, tool_handler, tool_router};
 use serde::Serialize;
 
-use protocol::{PresenceState, SessionConfigUpdate, SessionView};
+use protocol::{PresenceState, SessionConfigUpdate, SessionId, SessionView};
 
 use crate::server::approvals::ApprovalRegistry;
 use crate::server::config::SharedNotifyConfig;
@@ -176,9 +176,9 @@ async fn resolve_session(
     sessions: &SessionRegistry,
     session_id: Option<String>,
     project: Option<String>,
-) -> Result<String, String> {
+) -> Result<SessionId, String> {
     if let Some(id) = session_id {
-        return Ok(id);
+        return Ok(SessionId::new(id));
     }
 
     let project = match project {

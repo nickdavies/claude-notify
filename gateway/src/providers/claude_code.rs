@@ -1,4 +1,4 @@
-use crate::types::{build_display_name, DecisionStatus, HookOutput, ParseError, ToolHookEvent};
+use crate::types::{DecisionStatus, HookOutput, ParseError, ToolHookEvent, build_display_name};
 use protocol::{
     ClaudeCodeHookInput, ClaudePermissionBehavior, ClaudePermissionRequestDecision,
     ClaudePermissionRequestOutput, ClaudePreToolUseDecision, ClaudePreToolUseOutput,
@@ -85,6 +85,7 @@ fn deny_message(decision: &HookOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::SessionId;
 
     // --- format_output: case-insensitive event matching ---
 
@@ -93,7 +94,7 @@ mod tests {
             ToolCall::try_from((protocol::Tool::Bash, serde_json::json!({"command": "ls"})))
                 .unwrap();
         ToolHookEvent {
-            session_id: "test-session".to_string(),
+            session_id: SessionId::new("test-session"),
             session_display_name: "test".to_string(),
             tool_call,
             cwd: "/tmp".to_string(),

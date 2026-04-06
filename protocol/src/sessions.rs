@@ -1,6 +1,73 @@
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
+
+// ===========================================================================
+// SessionId — opaque session identifier newtype
+// ===========================================================================
+
+/// Opaque session identifier.
+///
+/// Wraps a `String` with `#[serde(transparent)]` so the JSON wire format
+/// stays a bare string — no migration needed for TypeScript plugins, shell
+/// scripts, or persisted state files.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    /// Create a new `SessionId` from any string-like value.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// View the underlying string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for SessionId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl AsRef<str> for SessionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for SessionId {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for SessionId {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+// ===========================================================================
+// Provider — which editor/agent owns a session
+// ===========================================================================
 
 /// The editor/agent that owns a session.
 #[derive(
@@ -114,7 +181,7 @@ impl SessionNotifyConfig {
 /// API response for a session (with effective status resolved).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SessionView {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub project: String,
     pub config: SessionNotifyConfig,
     pub editor_type: Provider,

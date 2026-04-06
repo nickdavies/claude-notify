@@ -17,6 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::{Display, EnumString};
 
+use crate::sessions::SessionId;
 use crate::tool::Tool;
 
 // ===========================================================================
@@ -421,7 +422,7 @@ impl JsonSchema for CursorTool {
 /// Input from the opencode hook (stdin JSON for both tool.execute.before and permission.ask).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OpenCodeHookInput {
-    pub session_id: String,
+    pub session_id: SessionId,
     #[serde(rename = "tool_name")]
     pub tool: OpenCodeTool,
     #[serde(default)]
@@ -462,7 +463,7 @@ pub struct OpenCodeHookOutput {
 /// No workspace_roots field — cwd is used as the single root.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ClaudeCodeHookInput {
-    pub session_id: String,
+    pub session_id: SessionId,
     #[serde(rename = "tool_name")]
     pub tool: ClaudeTool,
     #[serde(default)]
@@ -519,14 +520,41 @@ pub struct ClaudePermissionBehavior {
 // Cursor
 // ---------------------------------------------------------------------------
 
+/// Which wire field Cursor used to identify the session.
+///
+/// Cursor sends `conversation_id`; we also accept `session_id` as fallback.
+/// The inner `String` is the raw identifier value from the JSON payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CursorSessionKey {
+    /// Cursor's native field.
+    #[serde(rename_all = "snake_case")]
+    ConversationId { conversation_id: String },
+    /// Fallback accepted from Cursor when conversation_id is absent.
+    #[serde(rename_all = "snake_case")]
+    SessionId { session_id: String },
+}
+
+impl CursorSessionKey {
+    /// Extract the raw identifier string regardless of which wire field was used.
+    pub fn into_session_id(self) -> SessionId {
+        match self {
+            CursorSessionKey::ConversationId { conversation_id } => SessionId::new(conversation_id),
+            CursorSessionKey::SessionId { session_id } => SessionId::new(session_id),
+        }
+    }
+}
+
 /// Input from Cursor hook (stdin JSON).
 ///
 /// Cursor uses `conversation_id` instead of `session_id`.
+/// The `session_key` field is flattened so the JSON wire format stays:
+/// `{"conversation_id": "...", ...}` or `{"session_id": "...", ...}`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CursorHookInput {
-    /// Cursor sends conversation_id; session_id is accepted as fallback.
-    pub conversation_id: Option<String>,
-    pub session_id: Option<String>,
+    /// The session identifier — resolved from `conversation_id` or `session_id`.
+    #[serde(flatten)]
+    pub session_key: CursorSessionKey,
     #[serde(rename = "tool_name")]
     pub tool: CursorTool,
     #[serde(default)]
@@ -688,6 +716,48 @@ mod tests {
         let json = r#"{"conversation_id":"c1","tool_name":"Read","tool_input":{}}"#;
         let input: CursorHookInput = serde_json::from_str(json).unwrap();
         assert_eq!(input.tool, CursorTool::Read);
+    }
+
+    #[test]
+    fn cursor_input_conversation_id_resolves() {
+        let json = r#"{"conversation_id":"c1","tool_name":"Read","tool_input":{}}"#;
+        let input: CursorHookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.session_key,
+            CursorSessionKey::ConversationId {
+                conversation_id: "c1".to_string()
+            }
+        );
+        assert_eq!(input.session_key.into_session_id(), "c1");
+    }
+
+    #[test]
+    fn cursor_input_session_id_fallback() {
+        let json = r#"{"session_id":"s1","tool_name":"Read","tool_input":{}}"#;
+        let input: CursorHookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            input.session_key,
+            CursorSessionKey::SessionId {
+                session_id: "s1".to_string()
+            }
+        );
+        assert_eq!(input.session_key.into_session_id(), "s1");
+    }
+
+    #[test]
+    fn cursor_input_conversation_id_preferred_over_session_id() {
+        // When both fields are present, conversation_id wins (untagged tries in order)
+        let json =
+            r#"{"conversation_id":"c1","session_id":"s1","tool_name":"Read","tool_input":{}}"#;
+        let input: CursorHookInput = serde_json::from_str(json).unwrap();
+        assert_eq!(input.session_key.into_session_id(), "c1");
+    }
+
+    #[test]
+    fn cursor_input_missing_both_ids_fails() {
+        let json = r#"{"tool_name":"Read","tool_input":{}}"#;
+        let result = serde_json::from_str::<CursorHookInput>(json);
+        assert!(result.is_err());
     }
 
     #[test]

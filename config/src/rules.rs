@@ -41,6 +41,10 @@ pub enum DefaultAction {
     Ask,
 }
 
+/// Rule action as it appears in the JSON config file.
+///
+/// For `Delegate` rules, the command is a separate `"command"` field in the JSON
+/// object — it is combined into [`ResolvedAction::Delegate`] at load time.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Display)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -49,6 +53,39 @@ pub enum RuleAction {
     Deny,
     Ask,
     Delegate,
+}
+
+/// Compiled rule action with all required data embedded.
+///
+/// Unlike [`RuleAction`] (which mirrors the JSON config), this enum guarantees
+/// that `Delegate` always carries a non-empty command string — enforced at
+/// config load time. No `.unwrap()` needed at match time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedAction {
+    Allow,
+    Deny,
+    Ask,
+    Delegate(String),
+}
+
+impl ResolvedAction {
+    /// The action variant as a [`RuleAction`] (for display/summary purposes).
+    pub fn action_kind(&self) -> RuleAction {
+        match self {
+            ResolvedAction::Allow => RuleAction::Allow,
+            ResolvedAction::Deny => RuleAction::Deny,
+            ResolvedAction::Ask => RuleAction::Ask,
+            ResolvedAction::Delegate(_) => RuleAction::Delegate,
+        }
+    }
+
+    /// The delegate command, if this is a `Delegate` action.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            ResolvedAction::Delegate(cmd) => Some(cmd),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) enum ToolPattern {
@@ -84,8 +121,7 @@ impl ToolMatcher {
 
 pub(crate) struct Rule {
     pub(crate) matchers: Vec<ToolMatcher>,
-    pub(crate) action: RuleAction,
-    pub(crate) command: Option<String>,
+    pub(crate) action: ResolvedAction,
     pub(crate) message: Option<String>,
     pub(crate) in_workspace: Option<bool>,
     pub(crate) in_paths: Option<Vec<String>>,
@@ -201,22 +237,29 @@ pub fn load_tool_config(path: &str) -> Result<ToolConfig, String> {
 
     let mut rules = Vec::with_capacity(raw.rules.len());
     for raw_rule in raw.rules {
-        if matches!(raw_rule.action, RuleAction::Delegate) && raw_rule.command.is_none() {
-            return Err(format!(
-                "rule for {:?} has action 'delegate' but no 'command'",
-                raw_rule.tools
-            ));
-        }
         let source_json = serde_json::to_string(&raw_rule).unwrap_or_default();
         let expanded = expand_tools(&raw_rule.tools, raw_rule.pattern.as_deref())?;
         let matchers = expanded
             .iter()
             .map(|t| parse_tool_entry(t))
             .collect::<Result<Vec<_>, _>>()?;
+        let resolved_action = match raw_rule.action {
+            RuleAction::Allow => ResolvedAction::Allow,
+            RuleAction::Deny => ResolvedAction::Deny,
+            RuleAction::Ask => ResolvedAction::Ask,
+            RuleAction::Delegate => {
+                let cmd = raw_rule.command.ok_or_else(|| {
+                    format!(
+                        "rule for {:?} has action 'delegate' but no 'command'",
+                        raw_rule.tools
+                    )
+                })?;
+                ResolvedAction::Delegate(cmd)
+            }
+        };
         rules.push(Rule {
             matchers,
-            action: raw_rule.action,
-            command: raw_rule.command,
+            action: resolved_action,
             message: raw_rule.message,
             in_workspace: raw_rule.in_workspace,
             in_paths: raw_rule
@@ -303,12 +346,12 @@ pub fn resolve_action(
                 rule.source_json
             );
             return match &rule.action {
-                RuleAction::Allow => ConfigAction::Decision(ConfigDecision::Allow),
-                RuleAction::Deny => {
+                ResolvedAction::Allow => ConfigAction::Decision(ConfigDecision::Allow),
+                ResolvedAction::Deny => {
                     ConfigAction::Decision(ConfigDecision::Deny(rule.message.clone()))
                 }
-                RuleAction::Ask => ConfigAction::Decision(ConfigDecision::Ask),
-                RuleAction::Delegate => ConfigAction::Delegation(rule.command.clone().unwrap()),
+                ResolvedAction::Ask => ConfigAction::Decision(ConfigDecision::Ask),
+                ResolvedAction::Delegate(command) => ConfigAction::Delegation(command.clone()),
             };
         }
     }
@@ -344,8 +387,8 @@ impl ToolConfig {
             .map(|(i, rule)| RuleSummary {
                 index: i,
                 tools: rule.matchers.iter().map(|m| m.name.clone()).collect(),
-                action: rule.action.clone(),
-                command: rule.command.clone(),
+                action: rule.action.action_kind(),
+                command: rule.action.command().map(str::to_owned),
                 source_json: rule.source_json.clone(),
             })
             .collect()
@@ -516,14 +559,13 @@ mod tests {
         ToolConfig { default, rules }
     }
 
-    fn make_rule(entries: &[&str], action: RuleAction) -> Rule {
+    fn make_rule(entries: &[&str], action: ResolvedAction) -> Rule {
         Rule {
             matchers: entries
                 .iter()
                 .map(|e| parse_tool_entry(e).unwrap())
                 .collect(),
             action,
-            command: None,
             message: None,
             in_workspace: None,
             in_paths: None,
@@ -537,8 +579,7 @@ mod tests {
                 .iter()
                 .map(|e| parse_tool_entry(e).unwrap())
                 .collect(),
-            action: RuleAction::Deny,
-            command: None,
+            action: ResolvedAction::Deny,
             message: Some(message.to_string()),
             in_workspace: None,
             in_paths: None,
@@ -548,7 +589,7 @@ mod tests {
 
     fn make_workspace_rule(
         entries: &[&str],
-        action: RuleAction,
+        action: ResolvedAction,
         in_workspace: Option<bool>,
     ) -> Rule {
         Rule {
@@ -557,7 +598,6 @@ mod tests {
                 .map(|e| parse_tool_entry(e).unwrap())
                 .collect(),
             action,
-            command: None,
             message: None,
             in_workspace,
             in_paths: None,
@@ -569,8 +609,8 @@ mod tests {
     fn deny_pattern_before_allow_bare() {
         let config = make_config(
             vec![
-                make_rule(&["Write(**/.env*)"], RuleAction::Deny),
-                make_rule(&["Write"], RuleAction::Allow),
+                make_rule(&["Write(**/.env*)"], ResolvedAction::Deny),
+                make_rule(&["Write"], ResolvedAction::Allow),
             ],
             DefaultAction::Ask,
         );
@@ -594,7 +634,7 @@ mod tests {
     #[test]
     fn unmatched_tool_falls_to_default() {
         let config = make_config(
-            vec![make_rule(&["Write"], RuleAction::Allow)],
+            vec![make_rule(&["Write"], ResolvedAction::Allow)],
             DefaultAction::Ask,
         );
         assert!(matches!(
@@ -606,7 +646,7 @@ mod tests {
     #[test]
     fn multiple_matchers_in_single_rule() {
         let config = make_config(
-            vec![make_rule(&["Read", "Grep", "Glob"], RuleAction::Allow)],
+            vec![make_rule(&["Read", "Grep", "Glob"], ResolvedAction::Allow)],
             DefaultAction::Ask,
         );
         assert!(matches!(
@@ -627,8 +667,8 @@ mod tests {
     fn pattern_with_no_input_skips_rule() {
         let config = make_config(
             vec![
-                make_rule(&["Write(/src/**)"], RuleAction::Allow),
-                make_rule(&["Write"], RuleAction::Deny),
+                make_rule(&["Write(/src/**)"], ResolvedAction::Allow),
+                make_rule(&["Write"], ResolvedAction::Deny),
             ],
             DefaultAction::Ask,
         );
@@ -644,7 +684,7 @@ mod tests {
     #[test]
     fn relative_path_without_cwd_is_denied() {
         let config = make_config(
-            vec![make_rule(&["Read"], RuleAction::Allow)],
+            vec![make_rule(&["Read"], ResolvedAction::Allow)],
             DefaultAction::Ask,
         );
         // Caller passes unresolved relative path (no cwd to resolve against)
@@ -668,7 +708,7 @@ mod tests {
     #[test]
     fn relative_path_resolved_by_cwd_is_allowed() {
         let config = make_config(
-            vec![make_rule(&["Read"], RuleAction::Allow)],
+            vec![make_rule(&["Read"], ResolvedAction::Allow)],
             DefaultAction::Ask,
         );
         // Caller has already resolved "src/main.rs" against cwd "/home/user/project"
@@ -687,7 +727,7 @@ mod tests {
     #[test]
     fn absolute_path_check_not_applied_to_shell() {
         let config = make_config(
-            vec![make_rule(&["Bash"], RuleAction::Allow)],
+            vec![make_rule(&["Bash"], ResolvedAction::Allow)],
             DefaultAction::Ask,
         );
         assert!(matches!(
@@ -736,7 +776,7 @@ mod tests {
     #[test]
     fn deny_rule_without_message() {
         let config = make_config(
-            vec![make_rule(&["Delete"], RuleAction::Deny)],
+            vec![make_rule(&["Delete"], ResolvedAction::Deny)],
             DefaultAction::Ask,
         );
         assert!(matches!(
@@ -760,8 +800,8 @@ mod tests {
     fn cwd_resolved_path_matches_pattern() {
         let config = make_config(
             vec![
-                make_rule(&[r"Read(regex:\.ssh)"], RuleAction::Deny),
-                make_rule(&["Read"], RuleAction::Allow),
+                make_rule(&[r"Read(regex:\.ssh)"], ResolvedAction::Deny),
+                make_rule(&["Read"], ResolvedAction::Allow),
             ],
             DefaultAction::Ask,
         );
@@ -888,14 +928,13 @@ mod tests {
                         .iter()
                         .map(|t| parse_tool_entry(t).expect("valid entry"))
                         .collect(),
-                    action: RuleAction::Deny,
-                    command: None,
+                    action: ResolvedAction::Deny,
                     message: Some("Access to .ssh is not allowed".into()),
                     in_workspace: None,
                     in_paths: None,
                     source_json: String::new(),
                 },
-                make_rule(&["Read", "Write"], RuleAction::Allow),
+                make_rule(&["Read", "Write"], ResolvedAction::Allow),
             ],
             DefaultAction::Ask,
         );
@@ -941,7 +980,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["Read"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -965,7 +1004,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["Read"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -988,8 +1027,8 @@ mod tests {
     fn in_workspace_false_matches_outside_paths() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Write"], RuleAction::Ask, Some(false)),
-                make_workspace_rule(&["Write"], RuleAction::Allow, None),
+                make_workspace_rule(&["Write"], ResolvedAction::Ask, Some(false)),
+                make_workspace_rule(&["Write"], ResolvedAction::Allow, None),
             ],
             DefaultAction::Deny,
         );
@@ -1022,7 +1061,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["Bash"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -1041,7 +1080,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["Read"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -1064,9 +1103,9 @@ mod tests {
     fn in_workspace_combined_with_deny_pattern() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Write(**/.git/**)"], RuleAction::Deny, Some(true)),
-                make_workspace_rule(&["Write"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["Write"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["Write(**/.git/**)"], ResolvedAction::Deny, Some(true)),
+                make_workspace_rule(&["Write"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["Write"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );
@@ -1110,7 +1149,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["Read"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -1136,8 +1175,8 @@ mod tests {
     fn grep_outside_workspace_triggers_in_workspace_rule() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Grep"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["Grep"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );
@@ -1169,8 +1208,8 @@ mod tests {
     fn grep_without_path_or_cwd_skips_workspace_rules() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Grep"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["Grep"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );
@@ -1187,8 +1226,8 @@ mod tests {
     fn grep_without_path_falls_back_to_cwd_for_workspace() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Grep"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["Grep"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["Grep"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );
@@ -1218,7 +1257,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["SemanticSearch"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -1244,8 +1283,8 @@ mod tests {
     fn semantic_search_one_dir_outside_workspace_taints() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["SemanticSearch"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["SemanticSearch"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["SemanticSearch"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["SemanticSearch"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );
@@ -1272,7 +1311,7 @@ mod tests {
         let config = make_config(
             vec![make_workspace_rule(
                 &["SemanticSearch"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
                 Some(true),
             )],
             DefaultAction::Deny,
@@ -1288,14 +1327,13 @@ mod tests {
 
     // --- in_paths ---
 
-    fn make_in_paths_rule(entries: &[&str], dirs: &[&str], action: RuleAction) -> Rule {
+    fn make_in_paths_rule(entries: &[&str], dirs: &[&str], action: ResolvedAction) -> Rule {
         Rule {
             matchers: entries
                 .iter()
                 .map(|e| parse_tool_entry(e).unwrap())
                 .collect(),
             action,
-            command: None,
             message: None,
             in_workspace: None,
             in_paths: Some(dirs.iter().map(|s| s.to_string()).collect()),
@@ -1309,7 +1347,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1331,7 +1369,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1346,8 +1384,8 @@ mod tests {
     fn in_paths_no_path_extracted_skips_rule() {
         let config = make_config(
             vec![
-                make_in_paths_rule(&["Read"], &["/home/user/oss"], RuleAction::Allow),
-                make_rule(&["Read"], RuleAction::Deny),
+                make_in_paths_rule(&["Read"], &["/home/user/oss"], ResolvedAction::Allow),
+                make_rule(&["Read"], ResolvedAction::Deny),
             ],
             DefaultAction::Ask,
         );
@@ -1364,7 +1402,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["SemanticSearch"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1387,8 +1425,12 @@ mod tests {
     fn in_paths_semantic_search_mixed_skips_rule() {
         let config = make_config(
             vec![
-                make_in_paths_rule(&["SemanticSearch"], &["/home/user/oss"], RuleAction::Allow),
-                make_rule(&["SemanticSearch"], RuleAction::Ask),
+                make_in_paths_rule(
+                    &["SemanticSearch"],
+                    &["/home/user/oss"],
+                    ResolvedAction::Allow,
+                ),
+                make_rule(&["SemanticSearch"], ResolvedAction::Ask),
             ],
             DefaultAction::Deny,
         );
@@ -1414,7 +1456,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss", "/home/user/workspaces"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1456,8 +1498,7 @@ mod tests {
         let config = make_config(
             vec![Rule {
                 matchers: vec![parse_tool_entry("Read").unwrap()],
-                action: RuleAction::Allow,
-                command: None,
+                action: ResolvedAction::Allow,
                 message: None,
                 in_workspace: Some(true),
                 in_paths: Some(vec!["/home/user/oss".to_string()]),
@@ -1504,8 +1545,7 @@ mod tests {
         let config = make_config(
             vec![Rule {
                 matchers: vec![parse_tool_entry("Read").unwrap()],
-                action: RuleAction::Allow,
-                command: None,
+                action: ResolvedAction::Allow,
                 message: None,
                 in_workspace: None,
                 in_paths: Some(vec![expanded.clone()]),
@@ -1527,7 +1567,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1551,7 +1591,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1576,7 +1616,7 @@ mod tests {
             vec![make_in_paths_rule(
                 &["Read"],
                 &["/home/user/oss"],
-                RuleAction::Allow,
+                ResolvedAction::Allow,
             )],
             DefaultAction::Ask,
         );
@@ -1596,8 +1636,8 @@ mod tests {
     fn glob_in_workspace_check() {
         let config = make_config(
             vec![
-                make_workspace_rule(&["Glob"], RuleAction::Allow, Some(true)),
-                make_workspace_rule(&["Glob"], RuleAction::Ask, Some(false)),
+                make_workspace_rule(&["Glob"], ResolvedAction::Allow, Some(true)),
+                make_workspace_rule(&["Glob"], ResolvedAction::Ask, Some(false)),
             ],
             DefaultAction::Deny,
         );

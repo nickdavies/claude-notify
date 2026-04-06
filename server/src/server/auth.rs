@@ -32,7 +32,7 @@ pub async fn require_auth<N: Notifier>(
             .config
             .tokens
             .iter()
-            .find(|t| t.secret == token)
+            .find(|t| t.secret.expose() == token)
             .ok_or(StatusCode::UNAUTHORIZED)?;
 
         debug!(

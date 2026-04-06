@@ -11,6 +11,7 @@ pub mod config;
 pub mod gateway;
 pub mod hooks;
 pub mod presence;
+pub mod secret;
 pub mod sessions;
 pub mod tool;
 pub mod tool_call;
@@ -25,15 +26,16 @@ pub use config::{ConfigResponse, NotifyConfig, NotifyConfigUpdate};
 pub use gateway::{
     ClaudeCodeHookInput, ClaudePermissionBehavior, ClaudePermissionRequestDecision,
     ClaudePermissionRequestOutput, ClaudePreToolUseDecision, ClaudePreToolUseOutput, ClaudeTool,
-    CursorHookInput, CursorHookOutput, CursorTool, DelegateOutput, DelegateOutputDecision,
-    DelegatePayload, DelegatePermission, OpenCodeHookInput, OpenCodeHookOutput, OpenCodeTool,
-    PermissionDecision,
+    CursorHookInput, CursorHookOutput, CursorSessionKey, CursorTool, DelegateOutput,
+    DelegateOutputDecision, DelegatePayload, DelegatePermission, OpenCodeHookInput,
+    OpenCodeHookOutput, OpenCodeTool, PermissionDecision,
 };
-pub use hooks::{HookPayload, StatusReport};
+pub use hooks::{NotificationPayload, SessionEndPayload, StatusReport, StopPayload};
 pub use presence::{PresenceState, PresenceUpdate};
+pub use secret::Secret;
 pub use sessions::{
     ApprovalModeResponse, EditorType, EffectiveSessionStatus, Provider, SessionApprovalMode,
-    SessionConfigUpdate, SessionNotifyConfig, SessionStatus, SessionView,
+    SessionConfigUpdate, SessionId, SessionNotifyConfig, SessionStatus, SessionView,
 };
 pub use tool::Tool;
 pub use tool_call::{MultiEditEntry, ToolCall, ToolCallKind, ToolCallParseError};

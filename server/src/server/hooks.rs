@@ -11,7 +11,10 @@ use tracing::{info, warn};
 
 // Re-export protocol types used by this module.
 use protocol::SessionStatus;
-pub use protocol::{ApprovalRequest, ApprovalResponse, HookPayload, StatusReport};
+pub use protocol::{
+    ApprovalRequest, ApprovalResponse, NotificationPayload, SessionEndPayload, SessionId,
+    StatusReport, StopPayload,
+};
 
 use super::AppState;
 use super::approvals;
@@ -20,7 +23,7 @@ use crate::server::presence::PresenceState;
 
 /// Tracks pending delayed notifications so they can be cancelled.
 pub struct PendingNotifications {
-    pending: RwLock<HashMap<String, CancellationToken>>,
+    pending: RwLock<HashMap<SessionId, CancellationToken>>,
 }
 
 impl PendingNotifications {
@@ -31,28 +34,28 @@ impl PendingNotifications {
     }
 
     /// Register a cancellation token for a session. Cancels any existing pending notification.
-    async fn insert(&self, session_id: &str) -> CancellationToken {
+    async fn insert(&self, session_id: &SessionId) -> CancellationToken {
         let mut map = self.pending.write().await;
         // Cancel any existing pending notification for this session
         if let Some(old) = map.remove(session_id) {
             old.cancel();
         }
         let token = CancellationToken::new();
-        map.insert(session_id.to_owned(), token.clone());
+        map.insert(session_id.clone(), token.clone());
         token
     }
 
     /// Cancel and remove a pending notification for a session.
-    pub async fn cancel(&self, session_id: &str) {
+    pub async fn cancel(&self, session_id: &SessionId) {
         let mut map = self.pending.write().await;
         if let Some(token) = map.remove(session_id) {
             token.cancel();
-            info!(session_id, "pending notification cancelled");
+            info!(session_id = %session_id, "pending notification cancelled");
         }
     }
 
     /// Remove the token (called when the delayed notification fires successfully).
-    async fn remove(&self, session_id: &str) {
+    async fn remove(&self, session_id: &SessionId) {
         self.pending.write().await.remove(session_id);
     }
 }
@@ -60,24 +63,18 @@ impl PendingNotifications {
 /// POST /hooks/stop
 pub async fn stop<N: Notifier>(
     State(state): State<AppState<N>>,
-    Json(payload): Json<HookPayload>,
+    Json(payload): Json<StopPayload>,
 ) -> StatusCode {
-    let (session_id, cwd) = match extract_session(&payload) {
-        Some(v) => v,
-        None => {
-            warn!("stop hook: missing session_id or cwd");
-            return StatusCode::OK;
-        }
-    };
+    let session_id = &payload.session_id;
 
     // Cancel any pending permission notification before sending the stop notification
-    state.pending.cancel(&session_id).await;
+    state.pending.cancel(session_id).await;
 
     let project = state
         .sessions
-        .get_or_register(&session_id, &cwd, payload.editor_type)
+        .get_or_register(session_id, &payload.cwd, payload.editor_type)
         .await;
-    let session_cfg = state.sessions.get_config(&session_id).await;
+    let session_cfg = state.sessions.get_config(session_id).await;
     let presence = state.presence.get().await;
     let global = state.notify_config.read().await;
 
@@ -94,7 +91,7 @@ pub async fn stop<N: Notifier>(
         });
     } else {
         info!(
-            session_id,
+            session_id = %session_id,
             present = ?presence,
             "stop hook: notification suppressed"
         );
@@ -102,7 +99,7 @@ pub async fn stop<N: Notifier>(
 
     state
         .sessions
-        .set_status(&session_id, SessionStatus::Ended, None, None)
+        .set_status(session_id, SessionStatus::Ended, None, None)
         .await;
 
     StatusCode::OK
@@ -111,36 +108,28 @@ pub async fn stop<N: Notifier>(
 /// POST /hooks/session-end
 pub async fn session_end<N: Notifier>(
     State(state): State<AppState<N>>,
-    Json(payload): Json<HookPayload>,
+    Json(payload): Json<SessionEndPayload>,
 ) -> StatusCode {
-    if let Some(session_id) = &payload.session_id {
-        state.pending.cancel(session_id).await;
-        state
-            .sessions
-            .set_status(session_id, SessionStatus::Ended, None, None)
-            .await;
-    }
+    state.pending.cancel(&payload.session_id).await;
+    state
+        .sessions
+        .set_status(&payload.session_id, SessionStatus::Ended, None, None)
+        .await;
     StatusCode::OK
 }
 
 /// POST /hooks/notification
 pub async fn notification<N: Notifier>(
     State(state): State<AppState<N>>,
-    Json(payload): Json<HookPayload>,
+    Json(payload): Json<NotificationPayload>,
 ) -> StatusCode {
-    let (session_id, cwd) = match extract_session(&payload) {
-        Some(v) => v,
-        None => {
-            warn!("notification hook: missing session_id or cwd");
-            return StatusCode::OK;
-        }
-    };
+    let session_id = &payload.session_id;
 
     let project = state
         .sessions
-        .get_or_register(&session_id, &cwd, payload.editor_type)
+        .get_or_register(session_id, &payload.cwd, payload.editor_type)
         .await;
-    let session_cfg = state.sessions.get_config(&session_id).await;
+    let session_cfg = state.sessions.get_config(session_id).await;
     let presence = state.presence.get().await;
     let global = state.notify_config.read().await;
 
@@ -150,7 +139,7 @@ pub async fn notification<N: Notifier>(
 
     if !should_notify {
         info!(
-            session_id,
+            session_id = %session_id,
             present = ?presence,
             "notification hook: notification suppressed"
         );
@@ -168,7 +157,7 @@ pub async fn notification<N: Notifier>(
             fire_and_forget(&*notifier, &title, &message, None).await;
         });
     } else {
-        let cancel = state.pending.insert(&session_id).await;
+        let cancel = state.pending.insert(session_id).await;
         let pending = Arc::clone(&state.pending);
         let sid = session_id.clone();
         tokio::spawn(async move {
@@ -183,13 +172,6 @@ pub async fn notification<N: Notifier>(
     }
 
     StatusCode::OK
-}
-
-fn extract_session(payload: &HookPayload) -> Option<(String, String)> {
-    match (&payload.session_id, &payload.cwd) {
-        (Some(sid), Some(cwd)) => Some((sid.clone(), cwd.clone())),
-        _ => None,
-    }
 }
 
 /// POST /api/v1/hooks/approval — register a pending approval request.

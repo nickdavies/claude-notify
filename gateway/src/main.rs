@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use config::{ConfigAction, expand_tilde, load_tool_config, resolve_action};
 use protocol::{
     ApprovalContext, ApprovalRequest, ApprovalResponse, ApprovalStatus, ApprovalWaitResponse,
-    ExtraContext, RequestType, StatusReport, ToolCallKind,
+    ExtraContext, RequestType, Secret, StatusReport, ToolCallKind,
 };
 use similar::{ChangeTag, TextDiff};
 use uuid::Uuid;
@@ -57,7 +57,7 @@ struct ApprovalArgs {
 
     /// Bearer token for server auth
     #[arg(long, env = "AGENT_HUB_TOKEN")]
-    token: String,
+    token: Secret,
 
     /// Maximum time to wait for approval in seconds
     #[arg(long, default_value = "600")]
@@ -76,7 +76,7 @@ struct StatusReportArgs {
 
     /// Bearer token for server auth
     #[arg(long, env = "AGENT_HUB_TOKEN")]
-    token: String,
+    token: Secret,
 }
 
 // --- Entrypoint ---
@@ -212,7 +212,7 @@ async fn run_status_report(args: StatusReportArgs) -> ExitCode {
 
     match client
         .post(&url)
-        .bearer_auth(&args.token)
+        .bearer_auth(args.token.expose())
         .json(&report)
         .timeout(Duration::from_secs(10))
         .send()
@@ -478,7 +478,7 @@ async fn escalate_to_server(
     );
     let register_resp = client
         .post(&register_url)
-        .bearer_auth(&args.token)
+        .bearer_auth(args.token.expose())
         .json(&ApprovalRequest {
             id: request_id,
             session_id: event.session_id.clone(),
@@ -538,7 +538,7 @@ async fn escalate_to_server(
             // Best-effort cancel — don't let this block shutdown for long.
             let _ = client
                 .post(&cancel_url)
-                .bearer_auth(&args.token)
+                .bearer_auth(args.token.expose())
                 .json(&serde_json::json!({"decision": "cancel"}))
                 .timeout(Duration::from_secs(5))
                 .send()
@@ -552,7 +552,7 @@ async fn escalate_to_server(
 async fn poll_for_decision(
     client: &reqwest::Client,
     wait_url: &str,
-    token: &str,
+    token: &Secret,
     deadline: tokio::time::Instant,
     timeout_secs: u64,
 ) -> Result<HookOutput, RunError> {
@@ -573,7 +573,7 @@ async fn poll_for_decision(
 
         let resp = client
             .get(wait_url)
-            .bearer_auth(token)
+            .bearer_auth(token.expose())
             .timeout(Duration::from_secs(60))
             .send()
             .await;

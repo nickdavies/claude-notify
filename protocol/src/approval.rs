@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 use uuid::Uuid;
 
+use crate::sessions::SessionId;
 use crate::tool::Tool;
 
 // ===========================================================================
@@ -147,7 +148,7 @@ pub struct ApprovalContext {
 pub struct Approval {
     pub id: Uuid,
     pub request_id: String,
-    pub session_id: String,
+    pub session_id: SessionId,
     pub session_display_name: String,
     pub project: String,
     #[serde(rename = "tool_name")]
@@ -188,7 +189,7 @@ impl ApprovalStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalRequest {
     pub id: String,
-    pub session_id: String,
+    pub session_id: SessionId,
     pub session_display_name: String,
     pub cwd: String,
     #[serde(rename = "tool_name")]

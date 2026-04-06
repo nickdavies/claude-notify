@@ -2,12 +2,44 @@
 // Adding a new tool means adding ONE entry here — group aliases, is_path_tool, and argument
 // extraction all derive from this table.
 
+use strum::{Display, EnumString};
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum ToolCategory {
     FileRead,
     FileWrite,
     Shell,
     Other,
+}
+
+/// Named groups that users can reference in config rules with an `@` prefix
+/// (e.g. `@file`, `@file_read`, `@shell`).
+#[derive(Debug, Clone, Copy, PartialEq, EnumString, Display)]
+pub enum ToolGroup {
+    #[strum(serialize = "@file")]
+    File,
+    #[strum(serialize = "@file_read")]
+    FileRead,
+    #[strum(serialize = "@file_write")]
+    FileWrite,
+    #[strum(serialize = "@shell")]
+    Shell,
+}
+
+impl ToolGroup {
+    /// Expand the group into its constituent tool names.
+    pub fn expand(self) -> Vec<&'static str> {
+        match self {
+            Self::File => {
+                let mut v = tools_in_category(ToolCategory::FileRead);
+                v.extend(tools_in_category(ToolCategory::FileWrite));
+                v
+            }
+            Self::FileRead => tools_in_category(ToolCategory::FileRead),
+            Self::FileWrite => tools_in_category(ToolCategory::FileWrite),
+            Self::Shell => tools_in_category(ToolCategory::Shell),
+        }
+    }
 }
 
 pub struct ToolDef {
@@ -122,17 +154,7 @@ pub fn is_path_tool(tool_name: &str) -> bool {
 }
 
 pub fn expand_tool_group(name: &str) -> Option<Vec<&'static str>> {
-    match name {
-        "@file" => {
-            let mut v = tools_in_category(ToolCategory::FileRead);
-            v.extend(tools_in_category(ToolCategory::FileWrite));
-            Some(v)
-        }
-        "@file_read" => Some(tools_in_category(ToolCategory::FileRead)),
-        "@file_write" => Some(tools_in_category(ToolCategory::FileWrite)),
-        "@shell" => Some(tools_in_category(ToolCategory::Shell)),
-        _ => None,
-    }
+    name.parse::<ToolGroup>().ok().map(|g| g.expand())
 }
 
 pub fn is_in_workspace(path: &str, workspace_roots: &[String]) -> bool {

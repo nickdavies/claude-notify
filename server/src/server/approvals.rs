@@ -10,6 +10,8 @@ use uuid::Uuid;
 // Re-export protocol types so existing `use super::approvals::X` imports work.
 pub use protocol::{Approval, ApprovalContext, ApprovalStatus};
 
+use protocol::SessionId;
+
 struct ApprovalEntry {
     approval: Approval,
     tx: watch::Sender<ApprovalStatus>,
@@ -23,12 +25,12 @@ pub struct ApprovalRegistry {
     /// request_id -> approval Uuid (idempotency)
     by_request_id: RwLock<HashMap<String, Uuid>>,
     /// session_id -> approval Uuids (multiple approvals per session)
-    by_session_id: RwLock<HashMap<String, HashSet<Uuid>>>,
+    by_session_id: RwLock<HashMap<SessionId, HashSet<Uuid>>>,
 }
 
 pub struct RegisterApproval {
     pub request_id: String,
-    pub session_id: String,
+    pub session_id: SessionId,
     pub session_display_name: String,
     pub project: String,
     pub tool: protocol::Tool,
@@ -140,7 +142,7 @@ impl ApprovalRegistry {
     }
 
     /// Returns the first (oldest) pending approval for the given session, if any.
-    pub async fn first_pending_for_session(&self, session_id: &str) -> Option<Approval> {
+    pub async fn first_pending_for_session(&self, session_id: &SessionId) -> Option<Approval> {
         let by_session = self.by_session_id.read().await;
         let entries = self.entries.read().await;
         by_session.get(session_id).and_then(|ids| {
@@ -153,7 +155,7 @@ impl ApprovalRegistry {
     }
 
     /// Remove all approvals for a session (on session eviction).
-    pub async fn evict_session(&self, session_id: &str) {
+    pub async fn evict_session(&self, session_id: &SessionId) {
         let approval_ids = {
             let mut by_sess = self.by_session_id.write().await;
             by_sess.remove(session_id).unwrap_or_default()
@@ -169,7 +171,7 @@ impl ApprovalRegistry {
                 let mut by_req = self.by_request_id.write().await;
                 by_req.remove(&req_id);
             }
-            info!(approval_id = %id, session_id, "approval evicted with session");
+            info!(approval_id = %id, session_id = %session_id, "approval evicted with session");
         }
     }
 

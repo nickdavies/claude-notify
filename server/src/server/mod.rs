@@ -37,7 +37,7 @@ use sessions::{EffectiveSessionStatus, SessionConfigUpdate, SessionRegistry, Ses
 // Import protocol types used directly in this module's handlers.
 use protocol::{
     ApprovalDecision, ApprovalModeResponse, ApprovalResolveRequest, ApprovalWaitResponse,
-    ConfigResponse,
+    ConfigResponse, SessionId,
 };
 
 pub struct AppState<N: Notifier> {
@@ -195,7 +195,13 @@ pub(crate) fn resolve_effective_status(
     match stored {
         SessionStatus::Active => EffectiveSessionStatus::Active,
         SessionStatus::Idle => EffectiveSessionStatus::Idle,
-        _ => unreachable!(),
+        // Ended and Waiting are handled by the early returns above.
+        // Listing them explicitly so adding a new SessionStatus variant
+        // produces a compile-time error instead of a runtime panic.
+        SessionStatus::Ended | SessionStatus::Waiting => {
+            debug_assert!(false, "Ended/Waiting should have been handled above");
+            EffectiveSessionStatus::Active
+        }
     }
 }
 
@@ -245,11 +251,14 @@ async fn handle_update_session<N: Notifier>(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(update): Json<SessionConfigUpdate>,
 ) -> Result<Json<sessions::SessionNotifyConfig>, crate::error::AppError> {
+    let session_id = SessionId::new(id);
     state
         .sessions
-        .update_config(&id, &update)
+        .update_config(&session_id, &update)
         .await
-        .ok_or(crate::error::AppError::SessionNotFound(id))
+        .ok_or(crate::error::AppError::SessionNotFound(
+            session_id.to_string(),
+        ))
         .map(Json)
 }
 
@@ -364,9 +373,10 @@ async fn handle_get_approval_mode<N: Notifier>(
     axum::extract::State(state): axum::extract::State<AppState<N>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<ApprovalModeResponse>, AppError> {
+    let session_id = SessionId::new(&id);
     let cfg = state
         .sessions
-        .get_config(&id)
+        .get_config(&session_id)
         .await
         .ok_or(AppError::SessionNotFound(id))?;
     Ok(Json(ApprovalModeResponse {

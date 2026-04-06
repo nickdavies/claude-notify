@@ -1,15 +1,16 @@
 use tracing::{error, info};
 
 use super::notifier::{Notifier, NotifyError};
+use protocol::Secret;
 
 pub struct PushoverClient {
     client: reqwest::Client,
-    token: String,
-    user: String,
+    token: Secret,
+    user: Secret,
 }
 
 impl PushoverClient {
-    pub fn new(token: String, user: String) -> Self {
+    pub fn new(token: Secret, user: Secret) -> Self {
         Self {
             client: reqwest::Client::new(),
             token,
@@ -25,8 +26,8 @@ impl Notifier for PushoverClient {
 
     async fn send(&self, title: &str, message: &str, url: Option<&str>) -> Result<(), NotifyError> {
         let mut form = vec![
-            ("token", self.token.as_str()),
-            ("user", self.user.as_str()),
+            ("token", self.token.expose()),
+            ("user", self.user.expose()),
             ("title", title),
             ("message", message),
         ];

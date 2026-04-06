@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // Re-export protocol types so existing `use super::config::X` imports work.
-pub use protocol::{NotifyConfig, NotifyConfigUpdate};
+pub use protocol::{NotifyConfig, NotifyConfigUpdate, Secret};
 
 use super::sessions::SessionApprovalMode;
 use crate::error::AppError;
@@ -41,7 +41,7 @@ pub struct ServerConfig {
 
 pub struct Token {
     pub label: String,
-    pub secret: String,
+    pub secret: Secret,
 }
 
 impl ServerConfig {
@@ -132,12 +132,12 @@ fn parse_tokens(raw: &str) -> Result<Vec<Token>, AppError> {
                 }
                 Ok(Token {
                     label: label.into(),
-                    secret: secret.into(),
+                    secret: Secret::new(secret),
                 })
             } else {
                 Ok(Token {
                     label: entry.into(),
-                    secret: entry.into(),
+                    secret: Secret::new(entry),
                 })
             }
         })
@@ -156,9 +156,9 @@ mod tests {
         let tokens = parse_tokens("desktop:abc123,mobile:def456").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].label, "desktop");
-        assert_eq!(tokens[0].secret, "abc123");
+        assert_eq!(tokens[0].secret.expose(), "abc123");
         assert_eq!(tokens[1].label, "mobile");
-        assert_eq!(tokens[1].secret, "def456");
+        assert_eq!(tokens[1].secret.expose(), "def456");
     }
 
     #[test]
@@ -166,7 +166,7 @@ mod tests {
         let tokens = parse_tokens("abc123,def456").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].label, "abc123");
-        assert_eq!(tokens[0].secret, "abc123");
+        assert_eq!(tokens[0].secret.expose(), "abc123");
     }
 
     #[test]

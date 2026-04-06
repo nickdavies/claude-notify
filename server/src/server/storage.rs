@@ -5,14 +5,14 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use protocol::{
-    Approval, NotifyConfig, PresenceState, Provider, SessionNotifyConfig, SessionStatus,
+    Approval, NotifyConfig, PresenceState, Provider, SessionId, SessionNotifyConfig, SessionStatus,
 };
 
 /// Serializable snapshot of server state that survives restarts.
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
-    pub sessions: HashMap<String, PersistedSession>,
+    pub sessions: HashMap<SessionId, PersistedSession>,
     pub notify_config: Option<NotifyConfig>,
     pub presence: Option<PresenceState>,
     #[serde(default)]

@@ -377,6 +377,7 @@ struct GrepInput {
 
 #[derive(Deserialize)]
 struct GlobInput {
+    #[serde(alias = "path")]
     target_directory: String,
 }
 
@@ -515,6 +516,19 @@ mod tests {
             }
         );
         assert_eq!(tc.matchable_args(), vec!["/home/user/project"]);
+    }
+
+    #[test]
+    fn glob_tool_path_alias() {
+        // OpenCode sends "path" instead of "target_directory"
+        let raw = json!({"path": "/home/user/project"});
+        let tc = ToolCall::try_from((Tool::Glob, raw)).unwrap();
+        assert_eq!(
+            *tc.kind(),
+            ToolCallKind::Glob {
+                target_directory: "/home/user/project".into()
+            }
+        );
     }
 
     #[test]

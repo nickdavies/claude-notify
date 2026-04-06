@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use protocol::{ApprovalDecision, ApprovalResolveRequest};
+use protocol::{ApprovalDecision, ApprovalResolveRequest, Secret};
 use uuid::Uuid;
 
 // Re-export Approval so existing `use crate::client::Approval` imports work.
@@ -9,11 +9,11 @@ pub use protocol::Approval;
 pub struct Client {
     http: reqwest::Client,
     base_url: String,
-    token: Option<String>,
+    token: Option<Secret>,
 }
 
 impl Client {
-    pub fn new(base_url: String, token: Option<String>) -> Self {
+    pub fn new(base_url: String, token: Option<Secret>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -27,7 +27,7 @@ impl Client {
 
     fn auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(token) = &self.token {
-            req.bearer_auth(token)
+            req.bearer_auth(token.expose())
         } else {
             req
         }

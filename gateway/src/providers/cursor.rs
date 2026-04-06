@@ -1,4 +1,4 @@
-use crate::types::{build_display_name, DecisionStatus, HookOutput, ParseError, ToolHookEvent};
+use crate::types::{DecisionStatus, HookOutput, ParseError, ToolHookEvent, build_display_name};
 use protocol::{CursorHookInput, CursorHookOutput, PermissionDecision, Tool, ToolCall};
 
 impl TryFrom<CursorHookInput> for ToolHookEvent {
@@ -9,11 +9,7 @@ impl TryFrom<CursorHookInput> for ToolHookEvent {
         let tool_call =
             ToolCall::try_from((tool, input.tool_input)).map_err(|e| ParseError(e.to_string()))?;
 
-        // Cursor uses conversation_id rather than session_id
-        let session_id = input
-            .conversation_id
-            .or(input.session_id)
-            .ok_or_else(|| ParseError("missing conversation_id".to_string()))?;
+        let session_id = input.session_key.into_session_id();
 
         // Cursor sends workspace_roots as an array; fall back to cwd
         let workspace_roots = input
