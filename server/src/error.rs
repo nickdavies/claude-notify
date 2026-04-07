@@ -11,6 +11,9 @@ pub enum AppError {
 
     #[error("approval not found: {0}")]
     ApprovalNotFound(String),
+
+    #[error("question not found: {0}")]
+    QuestionNotFound(String),
 }
 
 impl IntoResponse for AppError {
@@ -18,6 +21,7 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::SessionNotFound(_) => StatusCode::NOT_FOUND,
             AppError::ApprovalNotFound(_) => StatusCode::NOT_FOUND,
+            AppError::QuestionNotFound(_) => StatusCode::NOT_FOUND,
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, self.to_string()).into_response()

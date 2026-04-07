@@ -166,6 +166,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
     // Spawn session eviction background task
     let sessions = Arc::clone(&state.sessions);
     let approvals = Arc::clone(&state.approvals);
+    let questions = Arc::clone(&state.questions);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -173,12 +174,17 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
             let evicted = sessions.evict_stale(Duration::from_secs(1800)).await;
             for session_id in &evicted {
                 approvals.evict_session(session_id).await;
+                questions.evict_session(session_id).await;
             }
             // Cancel approvals whose gateway has stopped polling (killed, crashed,
             // or lost connectivity). Threshold is 2× the 55s long-poll window.
             let orphaned = approvals.evict_orphaned(Duration::from_secs(120)).await;
             if orphaned > 0 {
                 info!(count = orphaned, "cancelled orphaned approvals");
+            }
+            let orphaned_q = questions.evict_orphaned(Duration::from_secs(120)).await;
+            if orphaned_q > 0 {
+                info!(count = orphaned_q, "cancelled orphaned questions");
             }
         }
     });

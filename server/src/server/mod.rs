@@ -6,6 +6,7 @@ pub mod notifier;
 pub mod oauth;
 pub mod presence;
 pub mod pushover;
+pub mod questions;
 pub mod sessions;
 pub mod storage;
 pub mod web;
@@ -32,12 +33,13 @@ use hooks::PendingNotifications;
 use notifier::Notifier;
 use oauth::OAuthManager;
 use presence::{Presence, PresenceUpdate};
+use questions::QuestionRegistry;
 use sessions::{EffectiveSessionStatus, SessionConfigUpdate, SessionRegistry, SessionStatus};
 
 // Import protocol types used directly in this module's handlers.
 use protocol::{
     ApprovalDecision, ApprovalModeResponse, ApprovalResolveRequest, ApprovalWaitResponse,
-    ConfigResponse, SessionId,
+    ConfigResponse, QuestionDecision, QuestionResolveRequest, QuestionWaitResponse, SessionId,
 };
 
 pub struct AppState<N: Notifier> {
@@ -48,6 +50,7 @@ pub struct AppState<N: Notifier> {
     pub notify_config: SharedNotifyConfig,
     pub pending: Arc<PendingNotifications>,
     pub approvals: Arc<ApprovalRegistry>,
+    pub questions: Arc<QuestionRegistry>,
     pub oauth: Arc<Option<OAuthManager>>,
 }
 
@@ -61,6 +64,7 @@ impl<N: Notifier> Clone for AppState<N> {
             notify_config: Arc::clone(&self.notify_config),
             pending: Arc::clone(&self.pending),
             approvals: Arc::clone(&self.approvals),
+            questions: Arc::clone(&self.questions),
             oauth: Arc::clone(&self.oauth),
         }
     }
@@ -92,6 +96,7 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
     if state.config.approval_mode != ApprovalFeatureMode::Disabled {
         api_v1 = api_v1
             .route("/hooks/approval", post(hooks::approval::<N>))
+            .route("/hooks/question", post(hooks::question::<N>))
             .route("/approvals/pending", get(handle_list_pending::<N>))
             .route("/approvals/{id}", get(handle_get_approval::<N>))
             .route("/approvals/{id}/wait", get(handle_approval_wait::<N>))
@@ -99,6 +104,10 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
                 "/approvals/{id}/resolve",
                 post(handle_approval_resolve::<N>),
             )
+            .route("/questions/pending", get(handle_list_questions::<N>))
+            .route("/questions/{id}", get(handle_get_question::<N>))
+            .route("/questions/{id}/wait", get(handle_question_wait::<N>))
+            .route("/questions/{id}/resolve", post(handle_question_resolve::<N>))
             .route(
                 "/sessions/{id}/approval-mode",
                 get(handle_get_approval_mode::<N>),
@@ -160,11 +169,12 @@ async fn health() -> &'static str {
 }
 
 /// Resolve the effective status for a session by combining its stored status
-/// with server-side knowledge (pending approvals).
+/// with server-side knowledge (pending approvals, pending questions).
 pub(crate) fn resolve_effective_status(
     stored: SessionStatus,
     waiting_reason: Option<&str>,
     pending_approval: Option<&approvals::Approval>,
+    pending_question: Option<&questions::PendingQuestion>,
 ) -> EffectiveSessionStatus {
     if stored == SessionStatus::Ended {
         return EffectiveSessionStatus::Ended;
@@ -182,6 +192,18 @@ pub(crate) fn resolve_effective_status(
             input_str
         };
         let reason = format!("Pending approval: {} — {}", approval.tool, truncated);
+        return EffectiveSessionStatus::Waiting {
+            reason: Some(reason),
+        };
+    }
+    // Pending questions are also waiting
+    if let Some(pq) = pending_question {
+        let header = pq
+            .questions
+            .first()
+            .map(|q| q.header.as_str())
+            .unwrap_or("question");
+        let reason = format!("Plan question: {header}");
         return EffectiveSessionStatus::Waiting {
             reason: Some(reason),
         };
@@ -214,10 +236,15 @@ async fn build_session_views<N: Notifier>(state: &AppState<N>) -> Vec<sessions::
             .approvals
             .first_pending_for_session(&s.session_id)
             .await;
+        let pending_q = state
+            .questions
+            .first_pending_for_session(&s.session_id)
+            .await;
         let status = resolve_effective_status(
             s.stored_status,
             s.waiting_reason.as_deref(),
             pending.as_ref(),
+            pending_q.as_ref(),
         );
         views.push(sessions::SessionView {
             session_id: s.session_id,
@@ -384,6 +411,91 @@ async fn handle_get_approval_mode<N: Notifier>(
     }))
 }
 
+// --- Question API handlers ---
+
+/// GET /api/v1/questions/pending — list all pending questions.
+async fn handle_list_questions<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+) -> Json<Vec<questions::PendingQuestion>> {
+    Json(state.questions.list_pending().await)
+}
+
+/// GET /api/v1/questions/{id} — get a single question by ID.
+async fn handle_get_question<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<Json<questions::PendingQuestion>, AppError> {
+    state
+        .questions
+        .get(id)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))
+        .map(Json)
+}
+
+/// GET /api/v1/questions/{id}/wait — long-poll for question answer (55s timeout).
+async fn handle_question_wait<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<(axum::http::StatusCode, Json<QuestionWaitResponse>), AppError> {
+    let mut rx = state
+        .questions
+        .subscribe(id)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))?;
+
+    state.questions.touch(id).await;
+
+    if rx.borrow().is_resolved() {
+        let status = rx.borrow().clone();
+        return Ok((
+            axum::http::StatusCode::OK,
+            Json(QuestionWaitResponse { status }),
+        ));
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(55), rx.changed()).await;
+
+    let status = rx.borrow().clone();
+    if result.is_ok() && status.is_resolved() {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(QuestionWaitResponse { status }),
+        ))
+    } else {
+        Ok((
+            axum::http::StatusCode::ACCEPTED,
+            Json(QuestionWaitResponse {
+                status: questions::QuestionStatus::Pending,
+            }),
+        ))
+    }
+}
+
+/// POST /api/v1/questions/{id}/resolve — answer/reject/cancel a question.
+async fn handle_question_resolve<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Json(req): Json<QuestionResolveRequest>,
+) -> Result<Json<questions::PendingQuestion>, AppError> {
+    let new_status = match req.decision {
+        QuestionDecision::Answer => {
+            questions::QuestionStatus::Answered {
+                answers: req.answers.unwrap_or_default(),
+            }
+        }
+        QuestionDecision::Reject => questions::QuestionStatus::Rejected { reason: req.reason },
+        QuestionDecision::Cancel => questions::QuestionStatus::Cancelled,
+    };
+
+    state
+        .questions
+        .resolve(id, new_status)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))
+        .map(Json)
+}
+
 impl<N: Notifier> AppState<N> {
     pub fn new(server_config: ServerConfig, notifier: N, oauth: Option<OAuthManager>) -> Self {
         let presence = Presence::new(server_config.presence_ttl_secs);
@@ -399,6 +511,7 @@ impl<N: Notifier> AppState<N> {
             notify_config: Arc::new(RwLock::new(notify_config)),
             pending: Arc::new(PendingNotifications::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
+            questions: Arc::new(QuestionRegistry::new()),
             oauth: Arc::new(oauth),
         }
     }

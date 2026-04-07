@@ -41,8 +41,6 @@ impl fmt::Display for ExtraContext {
 // ===========================================================================
 
 /// The type of approval request.
-///
-/// Currently only `ToolUse` exists; `PlanQuestion` is planned for Phase 2.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Display, EnumString,
 )]
@@ -50,6 +48,8 @@ impl fmt::Display for ExtraContext {
 #[strum(serialize_all = "snake_case")]
 pub enum RequestType {
     ToolUse,
+    /// A plan-mode question proxied from opencode's question tool.
+    PlanQuestion,
 }
 
 // ===========================================================================
