@@ -21,6 +21,17 @@
         tr.tool-preview td { border-top: none; padding-top: 0; padding-bottom: 0.75rem; }
         tr.tool-preview.visible { display: table-row; }
         tr.tool-preview code { font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; color: var(--pico-muted-color); }
+
+        /* Session status badges */
+        .status-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; line-height: 1.4; text-transform: capitalize; }
+        .status-active { background: #16a34a22; color: #16a34a; }
+        .status-idle { background: #6b728022; color: #6b7280; }
+        .status-waiting { background: #f59e0b22; color: #d97706; animation: pulse-waiting 2s ease-in-out infinite; }
+        .status-ended { background: #6b728015; color: #9ca3af; }
+        @keyframes pulse-waiting { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        tr.session-ended td { opacity: 0.5; }
+        .session-name { font-size: 0.85rem; color: var(--pico-muted-color); }
+        .waiting-reason { font-size: 0.7rem; color: #d97706; margin-left: 0.25rem; }
     </style>
 </head>
 <body>
@@ -54,7 +65,7 @@
             <tr class="meta-row" data-id="{{ a.id }}">
                 <td>{{ a.project }}</td>
                 <td>{{ a.session_display_name }}</td>
-                <td>{{ a.tool_name }}</td>
+                <td>{{ a.tool }}</td>
                 <td>{{ a.created_at.format("%H:%M:%S") }}</td>
                 <td>
                     <a href="/approvals/{{ a.id }}">Review</a>
@@ -87,19 +98,23 @@
     <table id="sessions-table">
         <thead>
             <tr>
+                <th>Status</th>
                 <th>Project</th>
-                <th>Session ID</th>
+                <th>Session</th>
                 {% if readwrite %}<th>Approval Mode</th>{% endif %}
             </tr>
         </thead>
         <tbody>
             {% for s in sessions %}
-            <tr>
+            <tr{% match s.status %}{% when crate::server::sessions::EffectiveSessionStatus::Ended %} class="session-ended"{% when _ %}{% endmatch %}>
+                <td>{% match s.status %}{% when crate::server::sessions::EffectiveSessionStatus::Active %}<span class="status-badge status-active">Active</span>{% when crate::server::sessions::EffectiveSessionStatus::Idle %}<span class="status-badge status-idle">Idle</span>{% when crate::server::sessions::EffectiveSessionStatus::Waiting with { reason } %}<span class="status-badge status-waiting">Waiting</span>{% if let Some(r) = reason %}<span class="waiting-reason">{{ r }}</span>{% endif %}{% when crate::server::sessions::EffectiveSessionStatus::Ended %}<span class="status-badge status-ended">Ended</span>{% endmatch %}</td>
                 <td>{{ s.project }}</td>
-                <td><code>{{ s.session_id }}</code></td>
+                <td>
+                    {% match s.display_name %}{% when Some with (name) %}<span class="session-name">{{ name }}</span><br>{% when None %}{% endmatch %}<code style="font-size:0.75rem">{{ s.session_id }}</code>
+                </td>
                 {% if readwrite %}
                 <td>
-                    {% if s.editor_type != crate::server::sessions::EditorType::Cursor %}
+                    {% if s.editor_type != crate::server::sessions::Provider::Cursor %}
                     <button class="outline" style="margin:0;padding:0.25rem 0.5rem"
                         onclick="toggleMode('{{ s.session_id }}', '{% if s.config.approval_mode == crate::server::sessions::SessionApprovalMode::Remote %}terminal{% else %}remote{% endif %}')">
                         {% if s.config.approval_mode == crate::server::sessions::SessionApprovalMode::Remote %}
@@ -334,6 +349,26 @@
         });
     }
 
+    function statusBadgeHtml(status) {
+        const s = status.status;
+        const cls = 'status-badge status-' + s;
+        const label = s.charAt(0).toUpperCase() + s.slice(1);
+        let html = `<span class="${cls}">${label}</span>`;
+        if (s === 'waiting' && status.reason) {
+            html += `<span class="waiting-reason">${esc(status.reason)}</span>`;
+        }
+        return html;
+    }
+
+    function sessionNameHtml(s) {
+        let html = '';
+        if (s.display_name) {
+            html += `<span class="session-name">${esc(s.display_name)}</span><br>`;
+        }
+        html += `<code style="font-size:0.75rem">${esc(s.session_id)}</code>`;
+        return html;
+    }
+
     function renderSessions(sessions) {
         const container = document.getElementById('sessions-container');
         if (sessions.length === 0) {
@@ -341,12 +376,16 @@
             return;
         }
         let html = `<table id="sessions-table"><thead><tr>
-            <th>Project</th><th>Session ID</th>`;
+            <th>Status</th><th>Project</th><th>Session</th>`;
         if (READWRITE) html += '<th>Approval Mode</th>';
         html += '</tr></thead><tbody>';
         sessions.forEach(s => {
             const mode = s.config.approval_mode;
-            html += `<tr><td>${esc(s.project)}</td><td><code>${esc(s.session_id)}</code></td>`;
+            const isEnded = s.status.status === 'ended';
+            html += `<tr${isEnded ? ' class="session-ended"' : ''}>`;
+            html += `<td>${statusBadgeHtml(s.status)}</td>`;
+            html += `<td>${esc(s.project)}</td>`;
+            html += `<td>${sessionNameHtml(s)}</td>`;
             if (READWRITE) {
                 if (s.editor_type !== 'cursor') {
                     const nextMode = mode === 'remote' ? 'terminal' : 'remote';

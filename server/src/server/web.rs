@@ -7,12 +7,12 @@ use serde::Deserialize;
 use tower_sessions::Session;
 use uuid::Uuid;
 
+use protocol::{Approval, SessionView};
+
 use super::AppState;
-use super::approvals::Approval;
 use super::config::ApprovalFeatureMode;
 use super::notifier::Notifier;
 use super::oauth;
-use super::sessions::SessionView;
 
 // --- Templates ---
 
@@ -97,7 +97,7 @@ pub async fn dashboard<N: Notifier>(
     session: Session,
 ) -> Response {
     let email = session_email(&session).await;
-    let sessions = state.sessions.list().await;
+    let sessions = super::build_session_views(&state).await;
     let pending_approvals = state.approvals.list_pending().await;
     let readwrite = state.config.approval_mode == ApprovalFeatureMode::Readwrite;
     let has_auth = state.config.auth_mode != crate::server::config::AuthMode::None;

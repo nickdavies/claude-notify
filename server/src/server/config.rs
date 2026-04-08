@@ -1,8 +1,10 @@
 use std::env;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+
+// Re-export protocol types so existing `use super::config::X` imports work.
+pub use protocol::{NotifyConfig, NotifyConfigUpdate, Secret};
 
 use super::sessions::SessionApprovalMode;
 use crate::error::AppError;
@@ -39,7 +41,7 @@ pub struct ServerConfig {
 
 pub struct Token {
     pub label: String,
-    pub secret: String,
+    pub secret: Secret,
 }
 
 impl ServerConfig {
@@ -130,55 +132,16 @@ fn parse_tokens(raw: &str) -> Result<Vec<Token>, AppError> {
                 }
                 Ok(Token {
                     label: label.into(),
-                    secret: secret.into(),
+                    secret: Secret::new(secret),
                 })
             } else {
                 Ok(Token {
                     label: entry.into(),
-                    secret: entry.into(),
+                    secret: Secret::new(entry),
                 })
             }
         })
         .collect()
-}
-
-/// Runtime-mutable notification config.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NotifyConfig {
-    pub stop_enabled: bool,
-    pub permission_enabled: bool,
-    /// Delay in seconds before sending permission notifications (0 = immediate).
-    pub notification_delay_secs: u64,
-}
-
-impl NotifyConfig {
-    pub fn with_delay(delay_secs: u64) -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            notification_delay_secs: delay_secs,
-        }
-    }
-
-    pub fn apply(&mut self, update: NotifyConfigUpdate) {
-        if let Some(v) = update.stop_enabled {
-            self.stop_enabled = v;
-        }
-        if let Some(v) = update.permission_enabled {
-            self.permission_enabled = v;
-        }
-        if let Some(v) = update.notification_delay_secs {
-            self.notification_delay_secs = v;
-        }
-    }
-}
-
-/// Partial update for NotifyConfig.
-#[derive(Deserialize)]
-pub struct NotifyConfigUpdate {
-    pub stop_enabled: Option<bool>,
-    pub permission_enabled: Option<bool>,
-    pub notification_delay_secs: Option<u64>,
 }
 
 /// Shared mutable notify config.
@@ -193,9 +156,9 @@ mod tests {
         let tokens = parse_tokens("desktop:abc123,mobile:def456").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].label, "desktop");
-        assert_eq!(tokens[0].secret, "abc123");
+        assert_eq!(tokens[0].secret.expose(), "abc123");
         assert_eq!(tokens[1].label, "mobile");
-        assert_eq!(tokens[1].secret, "def456");
+        assert_eq!(tokens[1].secret.expose(), "def456");
     }
 
     #[test]
@@ -203,7 +166,7 @@ mod tests {
         let tokens = parse_tokens("abc123,def456").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].label, "abc123");
-        assert_eq!(tokens[0].secret, "abc123");
+        assert_eq!(tokens[0].secret.expose(), "abc123");
     }
 
     #[test]

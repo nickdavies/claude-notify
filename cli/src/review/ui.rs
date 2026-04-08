@@ -8,6 +8,7 @@ use crossterm::terminal::{self, Clear, ClearType};
 use crossterm::{execute, queue};
 
 use crate::client::Approval;
+use protocol::tool_call::{ToolCall, ToolCallKind};
 
 /// What the user wants to do after a UI event.
 pub enum Action {
@@ -278,7 +279,7 @@ impl Ui {
                     queue!(stdout, Print("  "))?;
                 }
 
-                let summary = format!("{} \u{203a} {}", approval.project, approval.tool_name);
+                let summary = format!("{} \u{203a} {}", approval.project, approval.tool);
                 let summary_pad = width.saturating_sub(summary.len() + age.len() + 4);
                 if is_selected {
                     queue!(
@@ -460,7 +461,8 @@ fn render_line(stdout: &mut io::Stdout, line: &ExpandedLine) -> io::Result<()> {
         LineKind::DiffContext => queue!(stdout, SetForegroundColor(Color::DarkGrey))?,
         LineKind::DiffHunkHeader => queue!(stdout, SetForegroundColor(Color::Cyan))?,
         LineKind::Info => queue!(stdout, SetForegroundColor(Color::Blue))?,
-        LineKind::Separator => unreachable!(),
+        // Separator is handled by the early return above; render as default if reached.
+        LineKind::Separator => queue!(stdout, ResetColor)?,
     }
 
     queue!(
@@ -488,6 +490,7 @@ fn build_expanded_lines(
     });
 
     if show_raw {
+        // Raw mode: dump the original JSON blob as-is.
         let json = serde_json::to_string_pretty(&approval.tool_input).unwrap_or_default();
         for line in json.lines() {
             lines.push(ExpandedLine {
@@ -495,26 +498,34 @@ fn build_expanded_lines(
                 kind: LineKind::Normal,
             });
         }
-    } else if approval.tool_name == "Write" {
-        build_write_diff_lines(&approval.tool_input, max_line_width, &mut lines);
     } else {
-        let input_str = format_tool_input(&approval.tool_input);
-        for line in input_str.lines() {
-            lines.push(ExpandedLine {
-                text: truncate_str(line, max_line_width),
-                kind: LineKind::Normal,
-            });
+        // Parse into a typed ToolCall to avoid manual JSON introspection.
+        let tool_call =
+            ToolCall::try_from((approval.tool.clone(), approval.tool_input.clone())).ok();
+
+        match tool_call.as_ref().map(|tc| tc.kind()) {
+            Some(ToolCallKind::Write { path, content }) => {
+                build_write_diff_lines(path, content.as_deref(), max_line_width, &mut lines);
+            }
+            _ => {
+                // Generic key-value display of the raw JSON for all other tools.
+                let input_str = format_tool_input(&approval.tool_input);
+                for line in input_str.lines() {
+                    lines.push(ExpandedLine {
+                        text: truncate_str(line, max_line_width),
+                        kind: LineKind::Normal,
+                    });
+                }
+            }
         }
     }
 
     if let Some(extra) = &approval.context.extra {
-        let text = if let Some(reason) = extra
-            .get("dippy_reason")
-            .and_then(|v: &serde_json::Value| v.as_str())
-        {
-            format!("Dippy: {reason}")
-        } else {
-            format!("Context: {}", extra)
+        let text = match extra {
+            protocol::ExtraContext::DippyReason { dippy_reason } => {
+                format!("Dippy: {dippy_reason}")
+            }
+            protocol::ExtraContext::Diff { diff } => format!("Context: {diff}"),
         };
         lines.push(ExpandedLine {
             text: String::new(),
@@ -529,24 +540,16 @@ fn build_expanded_lines(
     lines
 }
 
-/// Build diff lines for a Write tool request.
+/// Build diff lines for a Write tool request using typed fields from `ToolCallKind::Write`.
 fn build_write_diff_lines(
-    tool_input: &serde_json::Value,
+    path: &str,
+    new_contents: Option<&str>,
     max_line_width: usize,
     lines: &mut Vec<ExpandedLine>,
 ) {
     use similar::{ChangeTag, TextDiff};
 
-    let path = tool_input
-        .get("path")
-        .or_else(|| tool_input.get("file_path"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let new_contents = tool_input
-        .get("contents")
-        .or_else(|| tool_input.get("content"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let new_contents = new_contents.unwrap_or("");
 
     let path_display = truncate_str(path, max_line_width.saturating_sub(6));
     lines.push(ExpandedLine {

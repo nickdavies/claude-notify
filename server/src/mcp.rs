@@ -10,13 +10,18 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::{ServerHandler, tool_handler, tool_router};
 use serde::Serialize;
 
+use protocol::{PresenceState, SessionConfigUpdate, SessionId, SessionView};
+
+use crate::server::approvals::ApprovalRegistry;
 use crate::server::config::SharedNotifyConfig;
-use crate::server::presence::{Presence, PresenceState};
-use crate::server::sessions::{SessionConfigUpdate, SessionRegistry};
+use crate::server::presence::Presence;
+use crate::server::resolve_effective_status;
+use crate::server::sessions::SessionRegistry;
 
 #[derive(Clone)]
 pub struct NotifyMcp {
     sessions: Arc<SessionRegistry>,
+    approvals: Arc<ApprovalRegistry>,
     notify_config: SharedNotifyConfig,
     presence: Arc<Presence>,
     tool_router: ToolRouter<Self>,
@@ -24,6 +29,7 @@ pub struct NotifyMcp {
 
 pub fn service(
     sessions: Arc<SessionRegistry>,
+    approvals: Arc<ApprovalRegistry>,
     notify_config: SharedNotifyConfig,
     presence: Arc<Presence>,
 ) -> StreamableHttpService<NotifyMcp> {
@@ -31,6 +37,7 @@ pub fn service(
         move || {
             Ok(NotifyMcp::new(
                 Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&notify_config),
                 Arc::clone(&presence),
             ))
@@ -56,11 +63,13 @@ struct ConfigureSessionParams {
 impl NotifyMcp {
     fn new(
         sessions: Arc<SessionRegistry>,
+        approvals: Arc<ApprovalRegistry>,
         notify_config: SharedNotifyConfig,
         presence: Arc<Presence>,
     ) -> Self {
         Self {
             sessions,
+            approvals,
             notify_config,
             presence,
             tool_router: Self::tool_router(),
@@ -92,10 +101,32 @@ impl NotifyMcp {
         }
     }
 
-    #[tool(description = "List all active Claude sessions with their notification configuration.")]
+    #[tool(
+        description = "List all active Claude sessions with their notification configuration and current status."
+    )]
     async fn list_sessions(&self) -> String {
-        let sessions = self.sessions.list().await;
-        serde_json::to_string_pretty(&sessions).unwrap_or_else(|e| e.to_string())
+        let raw = self.sessions.list().await;
+        let mut views = Vec::with_capacity(raw.len());
+        for s in raw {
+            let pending = self
+                .approvals
+                .first_pending_for_session(&s.session_id)
+                .await;
+            let status = resolve_effective_status(
+                s.stored_status,
+                s.waiting_reason.as_deref(),
+                pending.as_ref(),
+            );
+            views.push(SessionView {
+                session_id: s.session_id,
+                project: s.project,
+                config: s.config,
+                editor_type: s.editor_type,
+                status,
+                display_name: s.display_name,
+            });
+        }
+        serde_json::to_string_pretty(&views).unwrap_or_else(|e| e.to_string())
     }
 
     #[tool(
@@ -145,9 +176,9 @@ async fn resolve_session(
     sessions: &SessionRegistry,
     session_id: Option<String>,
     project: Option<String>,
-) -> Result<String, String> {
+) -> Result<SessionId, String> {
     if let Some(id) = session_id {
-        return Ok(id);
+        return Ok(SessionId::new(id));
     }
 
     let project = match project {

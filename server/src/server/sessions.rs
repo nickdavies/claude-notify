@@ -2,98 +2,42 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::storage::PersistedSession;
+// Re-export protocol types so existing `use super::sessions::X` imports work.
+pub use protocol::{
+    EffectiveSessionStatus, Provider, SessionApprovalMode, SessionConfigUpdate, SessionId,
+    SessionNotifyConfig, SessionStatus, SessionView,
+};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorType {
-    Claude,
-    Cursor,
-    #[default]
-    Unknown,
-}
+use super::storage::PersistedSession;
 
 pub struct SessionInner {
     pub project: String,
     pub last_seen: Instant,
     pub config: SessionNotifyConfig,
-    pub editor_type: EditorType,
+    pub editor_type: Provider,
+    pub status: SessionStatus,
+    pub waiting_reason: Option<String>,
+    pub display_name: Option<String>,
+    pub ended_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum SessionApprovalMode {
-    #[default]
-    Remote,
-    Terminal,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SessionNotifyConfig {
-    pub stop_enabled: bool,
-    pub permission_enabled: bool,
-    #[serde(default)]
-    pub approval_mode: SessionApprovalMode,
-}
-
-impl SessionNotifyConfig {
-    pub fn with_default_approval_mode(mode: SessionApprovalMode) -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            approval_mode: mode,
-        }
-    }
-}
-
-impl Default for SessionNotifyConfig {
-    fn default() -> Self {
-        Self {
-            stop_enabled: true,
-            permission_enabled: true,
-            approval_mode: SessionApprovalMode::default(),
-        }
-    }
-}
-
-/// Partial update for per-session config.
-#[derive(Deserialize)]
-pub struct SessionConfigUpdate {
-    pub stop_enabled: Option<bool>,
-    pub permission_enabled: Option<bool>,
-    pub approval_mode: Option<SessionApprovalMode>,
-}
-
-impl SessionNotifyConfig {
-    pub fn apply(&mut self, update: &SessionConfigUpdate) {
-        if let Some(v) = update.stop_enabled {
-            self.stop_enabled = v;
-        }
-        if let Some(v) = update.permission_enabled {
-            self.permission_enabled = v;
-        }
-        if let Some(v) = update.approval_mode {
-            self.approval_mode = v;
-        }
-    }
-}
-
-/// API response for a session.
-#[derive(Clone, Serialize)]
-pub struct SessionView {
-    pub session_id: String,
+/// Raw session data for internal use (before effective status resolution).
+#[derive(Clone, serde::Serialize)]
+pub struct RawSessionView {
+    pub session_id: SessionId,
     pub project: String,
     pub config: SessionNotifyConfig,
-    pub editor_type: EditorType,
+    pub editor_type: Provider,
+    pub stored_status: SessionStatus,
+    pub waiting_reason: Option<String>,
+    pub display_name: Option<String>,
 }
 
 pub struct SessionRegistry {
-    sessions: RwLock<HashMap<String, SessionInner>>,
+    sessions: RwLock<HashMap<SessionId, SessionInner>>,
     ttl: Duration,
     default_approval_mode: SessionApprovalMode,
 }
@@ -116,44 +60,41 @@ impl SessionRegistry {
     /// `editor_type` is set on first registration and not overwritten on subsequent calls.
     pub async fn get_or_register(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
         cwd: &str,
-        editor_type: Option<EditorType>,
+        editor_type: Option<Provider>,
     ) -> String {
         let project = extract_project_name(cwd);
         let mut sessions = self.sessions.write().await;
         let now = Instant::now();
         let default_mode = self.default_approval_mode;
         sessions
-            .entry(session_id.to_owned())
+            .entry(session_id.clone())
             .and_modify(|s| s.last_seen = now)
             .or_insert_with(|| {
-                info!(session_id, project = project, "session registered");
+                info!(session_id = %session_id, project = project, "session registered");
                 SessionInner {
                     project: project.clone(),
                     last_seen: now,
                     config: SessionNotifyConfig::with_default_approval_mode(default_mode),
                     editor_type: editor_type.unwrap_or_default(),
+                    status: SessionStatus::default(),
+                    waiting_reason: None,
+                    display_name: None,
+                    ended_at: None,
                 }
             });
         project
     }
 
-    pub async fn deregister(&self, session_id: &str) {
-        let mut sessions = self.sessions.write().await;
-        if sessions.remove(session_id).is_some() {
-            info!(session_id, "session deregistered");
-        }
-    }
-
-    pub async fn get_config(&self, session_id: &str) -> Option<SessionNotifyConfig> {
+    pub async fn get_config(&self, session_id: &SessionId) -> Option<SessionNotifyConfig> {
         let sessions = self.sessions.read().await;
         sessions.get(session_id).map(|s| s.config.clone())
     }
 
     pub async fn update_config(
         &self,
-        session_id: &str,
+        session_id: &SessionId,
         update: &SessionConfigUpdate,
     ) -> Option<SessionNotifyConfig> {
         let mut sessions = self.sessions.write().await;
@@ -163,29 +104,76 @@ impl SessionRegistry {
         })
     }
 
-    pub async fn list(&self) -> Vec<SessionView> {
+    /// Update the stored status for a session. Returns true if the session exists.
+    pub async fn set_status(
+        &self,
+        session_id: &SessionId,
+        status: SessionStatus,
+        waiting_reason: Option<String>,
+        display_name: Option<String>,
+    ) -> bool {
+        let mut sessions = self.sessions.write().await;
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.status = status;
+            s.last_seen = Instant::now();
+            // Clear waiting_reason unless we're setting Waiting
+            s.waiting_reason = if status == SessionStatus::Waiting {
+                waiting_reason
+            } else {
+                None
+            };
+            if let Some(name) = display_name {
+                s.display_name = Some(name);
+            }
+            if status == SessionStatus::Ended {
+                s.ended_at = Some(Instant::now());
+            }
+            info!(session_id = %session_id, status = ?status, "session status updated");
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Update the display name for a session (e.g. from an approval request).
+    pub async fn set_display_name(&self, session_id: &SessionId, display_name: String) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.display_name = Some(display_name);
+        }
+    }
+
+    /// List sessions as raw data (without effective status computation).
+    /// The caller is responsible for resolving effective status.
+    pub async fn list(&self) -> Vec<RawSessionView> {
         let sessions = self.sessions.read().await;
         sessions
             .iter()
-            .map(|(id, s)| SessionView {
+            .map(|(id, s)| RawSessionView {
                 session_id: id.clone(),
                 project: s.project.clone(),
                 config: s.config.clone(),
                 editor_type: s.editor_type,
+                stored_status: s.status,
+                waiting_reason: s.waiting_reason.clone(),
+                display_name: s.display_name.clone(),
             })
             .collect()
     }
 
-    pub async fn find_by_project(&self, name: &str) -> Vec<SessionView> {
+    pub async fn find_by_project(&self, name: &str) -> Vec<RawSessionView> {
         let sessions = self.sessions.read().await;
         sessions
             .iter()
             .filter(|(_, s)| s.project == name)
-            .map(|(id, s)| SessionView {
+            .map(|(id, s)| RawSessionView {
                 session_id: id.clone(),
                 project: s.project.clone(),
                 config: s.config.clone(),
                 editor_type: s.editor_type,
+                stored_status: s.status,
+                waiting_reason: s.waiting_reason.clone(),
+                display_name: s.display_name.clone(),
             })
             .collect()
     }
@@ -195,7 +183,7 @@ impl SessionRegistry {
     }
 
     /// Export all sessions for persistence.
-    pub async fn snapshot(&self) -> HashMap<String, PersistedSession> {
+    pub async fn snapshot(&self) -> HashMap<SessionId, PersistedSession> {
         let sessions = self.sessions.read().await;
         sessions
             .iter()
@@ -206,6 +194,8 @@ impl SessionRegistry {
                         project: s.project.clone(),
                         config: s.config.clone(),
                         editor_type: s.editor_type,
+                        status: s.status,
+                        display_name: s.display_name.clone(),
                     },
                 )
             })
@@ -213,15 +203,20 @@ impl SessionRegistry {
     }
 
     /// Restore sessions from persisted state. Sets last_seen to now for fresh TTL.
-    pub async fn restore(&self, sessions: HashMap<String, PersistedSession>) {
+    pub async fn restore(&self, sessions: HashMap<SessionId, PersistedSession>) {
         let mut map = self.sessions.write().await;
         let now = Instant::now();
         for (id, persisted) in sessions {
             info!(
-                session_id = id,
+                session_id = %id,
                 project = persisted.project,
                 "session restored"
             );
+            let ended_at = if persisted.status == SessionStatus::Ended {
+                Some(now) // Start the 30-min eviction window from restart
+            } else {
+                None
+            };
             map.insert(
                 id,
                 SessionInner {
@@ -229,20 +224,28 @@ impl SessionRegistry {
                     last_seen: now,
                     config: persisted.config,
                     editor_type: persisted.editor_type,
+                    status: persisted.status,
+                    waiting_reason: None,
+                    display_name: persisted.display_name,
+                    ended_at,
                 },
             );
         }
     }
 
-    /// Evict sessions that haven't been seen within the TTL.
+    /// Evict sessions past their TTL.
+    /// Active/idle/waiting sessions use the default TTL; ended sessions use `ended_ttl`.
     /// Returns the IDs of evicted sessions.
-    pub async fn evict_stale(&self) -> Vec<String> {
+    pub async fn evict_stale(&self, ended_ttl: Duration) -> Vec<SessionId> {
         let mut sessions = self.sessions.write().await;
         let mut evicted_ids = Vec::new();
         sessions.retain(|id, s| {
-            let alive = s.last_seen.elapsed() < self.ttl;
+            let alive = match s.status {
+                SessionStatus::Ended => s.ended_at.is_some_and(|t| t.elapsed() < ended_ttl),
+                _ => s.last_seen.elapsed() < self.ttl,
+            };
             if !alive {
-                info!(session_id = id, "session evicted (stale)");
+                info!(session_id = %id, status = ?s.status, "session evicted (stale)");
                 evicted_ids.push(id.clone());
             }
             alive
@@ -277,43 +280,107 @@ mod tests {
         assert_eq!(extract_project_name("relative/path"), "path");
     }
 
-    #[tokio::test]
-    async fn register_and_list() {
-        let reg = SessionRegistry::new(7200);
-        reg.get_or_register("s1", "/home/nick/project-a", None)
-            .await;
-        reg.get_or_register("s2", "/home/nick/project-b", None)
-            .await;
-        let sessions = reg.list().await;
-        assert_eq!(sessions.len(), 2);
+    // ---------------------------------------------------------------
+    // Serde deserialization tests — ensure every editor_type value
+    // that providers actually send is accepted by the server.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn deserialize_editor_type_all_variants() {
+        // These are the values each provider plugin sends as editor_type.
+        let cases = [
+            ("\"claude\"", Provider::Claude),
+            ("\"cursor\"", Provider::Cursor),
+            ("\"opencode\"", Provider::Opencode),
+            ("\"unknown\"", Provider::Unknown),
+        ];
+        for (json, expected) in cases {
+            let got: Provider =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} => {e}"));
+            assert_eq!(got, expected, "deserialized {json}");
+        }
+    }
+
+    #[test]
+    fn deserialize_editor_type_rejects_unknown_variant() {
+        // A typo or new provider that hasn't been added should fail
+        // at deserialization time rather than silently being accepted.
+        let result = serde_json::from_str::<Provider>("\"vscode\"");
+        assert!(result.is_err(), "unknown editor_type should fail");
+    }
+
+    #[test]
+    fn deserialize_session_status_all_variants() {
+        let cases = [
+            ("\"active\"", SessionStatus::Active),
+            ("\"idle\"", SessionStatus::Idle),
+            ("\"waiting\"", SessionStatus::Waiting),
+            ("\"ended\"", SessionStatus::Ended),
+        ];
+        for (json, expected) in cases {
+            let got: SessionStatus =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} => {e}"));
+            assert_eq!(got, expected, "deserialized {json}");
+        }
+    }
+
+    #[test]
+    fn serialize_effective_status_tagged() {
+        // Verify the JSON shape the web UI expects (internally-tagged enum).
+        let active = serde_json::to_value(EffectiveSessionStatus::Active).unwrap();
+        assert_eq!(active["status"], "active");
+
+        let idle = serde_json::to_value(EffectiveSessionStatus::Idle).unwrap();
+        assert_eq!(idle["status"], "idle");
+
+        let waiting = serde_json::to_value(EffectiveSessionStatus::Waiting {
+            reason: Some("test".to_string()),
+        })
+        .unwrap();
+        assert_eq!(waiting["status"], "waiting");
+        assert_eq!(waiting["reason"], "test");
+
+        let ended = serde_json::to_value(EffectiveSessionStatus::Ended).unwrap();
+        assert_eq!(ended["status"], "ended");
     }
 
     #[tokio::test]
-    async fn deregister() {
+    async fn register_and_list() {
         let reg = SessionRegistry::new(7200);
-        reg.get_or_register("s1", "/home/nick/project-a", None)
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/project-a", None)
             .await;
-        reg.deregister("s1").await;
-        assert_eq!(reg.count().await, 0);
+        reg.get_or_register(&SessionId::new("s2"), "/home/nick/project-b", None)
+            .await;
+        let sessions = reg.list().await;
+        assert_eq!(sessions.len(), 2);
+        // Default status should be Active
+        assert!(
+            sessions
+                .iter()
+                .all(|s| s.stored_status == SessionStatus::Active)
+        );
     }
 
     #[tokio::test]
     async fn find_by_project() {
         let reg = SessionRegistry::new(7200);
-        reg.get_or_register("s1", "/home/nick/myapp", None).await;
-        reg.get_or_register("s2", "/home/nick/other", None).await;
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/myapp", None)
+            .await;
+        reg.get_or_register(&SessionId::new("s2"), "/home/nick/other", None)
+            .await;
         let found = reg.find_by_project("myapp").await;
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].session_id, "s1");
+        assert_eq!(found[0].session_id, SessionId::new("s1"));
     }
 
     #[tokio::test]
     async fn update_session_config() {
         let reg = SessionRegistry::new(7200);
-        reg.get_or_register("s1", "/home/nick/proj", None).await;
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/proj", None)
+            .await;
         let cfg = reg
             .update_config(
-                "s1",
+                &SessionId::new("s1"),
                 &SessionConfigUpdate {
                     stop_enabled: Some(false),
                     permission_enabled: None,
@@ -324,5 +391,85 @@ mod tests {
             .unwrap();
         assert!(!cfg.stop_enabled);
         assert!(cfg.permission_enabled);
+    }
+
+    #[tokio::test]
+    async fn set_status() {
+        let reg = SessionRegistry::new(7200);
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/proj", None)
+            .await;
+
+        // Set to Idle
+        assert!(
+            reg.set_status(&SessionId::new("s1"), SessionStatus::Idle, None, None)
+                .await
+        );
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].stored_status, SessionStatus::Idle);
+        assert!(sessions[0].waiting_reason.is_none());
+
+        // Set to Waiting with reason
+        assert!(
+            reg.set_status(
+                &SessionId::new("s1"),
+                SessionStatus::Waiting,
+                Some("plan question".to_string()),
+                None
+            )
+            .await
+        );
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].stored_status, SessionStatus::Waiting);
+        assert_eq!(sessions[0].waiting_reason.as_deref(), Some("plan question"));
+
+        // Set to Active clears waiting_reason
+        assert!(
+            reg.set_status(&SessionId::new("s1"), SessionStatus::Active, None, None)
+                .await
+        );
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].stored_status, SessionStatus::Active);
+        assert!(sessions[0].waiting_reason.is_none());
+
+        // Non-existent session returns false
+        assert!(
+            !reg.set_status(&SessionId::new("nope"), SessionStatus::Idle, None, None)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn set_status_ended_sets_ended_at() {
+        let reg = SessionRegistry::new(7200);
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/proj", None)
+            .await;
+        reg.set_status(&SessionId::new("s1"), SessionStatus::Ended, None, None)
+            .await;
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].stored_status, SessionStatus::Ended);
+    }
+
+    #[tokio::test]
+    async fn display_name() {
+        let reg = SessionRegistry::new(7200);
+        reg.get_or_register(&SessionId::new("s1"), "/home/nick/proj", None)
+            .await;
+
+        // Set display name via set_display_name
+        reg.set_display_name(&SessionId::new("s1"), "Fix auth bug".to_string())
+            .await;
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].display_name.as_deref(), Some("Fix auth bug"));
+
+        // Set display name via set_status
+        reg.set_status(
+            &SessionId::new("s1"),
+            SessionStatus::Active,
+            None,
+            Some("New task name".to_string()),
+        )
+        .await;
+        let sessions = reg.list().await;
+        assert_eq!(sessions[0].display_name.as_deref(), Some("New task name"));
     }
 }

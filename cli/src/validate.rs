@@ -1,4 +1,5 @@
 use crate::client::Client;
+use protocol::Secret;
 
 /// Validate subcommand — checks config, rules, delegate commands, and server connectivity.
 /// Returns the process exit code (0 = pass, 1 = failures).
@@ -57,7 +58,7 @@ pub async fn run(config_path: String, server: Option<String>, token: Option<Stri
 
         // Check 3: Delegate commands
         for s in &summaries {
-            if s.action == "delegate"
+            if s.action == config::RuleAction::Delegate
                 && let Some(cmd) = &s.command
             {
                 let executable = cmd.split_whitespace().next().unwrap_or(cmd);
@@ -79,7 +80,7 @@ pub async fn run(config_path: String, server: Option<String>, token: Option<Stri
     match &server {
         Some(server_url) => {
             let server_url = normalize_server_url(server_url);
-            let client = Client::new(server_url.clone(), token.clone());
+            let client = Client::new(server_url.clone(), token.as_deref().map(Secret::new));
 
             // Phase A: health check (unauthenticated)
             match client.health_check().await {

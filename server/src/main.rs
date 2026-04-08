@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use protocol::Secret;
 use server::config::ApprovalFeatureMode;
 use server::notifier::{Notifier, NullNotifier};
 use server::oauth::OAuthManager;
@@ -94,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
                 user,
                 storage,
             } => {
-                let notifier = PushoverClient::new(token, user);
+                let notifier = PushoverClient::new(Secret::new(token), Secret::new(user));
                 serve_with_storage(notifier, storage).await
             }
             NotifierArgs::Webhook { url, storage } => {
@@ -169,7 +170,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let evicted = sessions.evict_stale().await;
+            let evicted = sessions.evict_stale(Duration::from_secs(1800)).await;
             for session_id in &evicted {
                 approvals.evict_session(session_id).await;
             }

@@ -4,16 +4,15 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::approvals::Approval;
-use super::config::NotifyConfig;
-use super::presence::PresenceState;
-use super::sessions::{EditorType, SessionNotifyConfig};
+use protocol::{
+    Approval, NotifyConfig, PresenceState, Provider, SessionId, SessionNotifyConfig, SessionStatus,
+};
 
 /// Serializable snapshot of server state that survives restarts.
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
-    pub sessions: HashMap<String, PersistedSession>,
+    pub sessions: HashMap<SessionId, PersistedSession>,
     pub notify_config: Option<NotifyConfig>,
     pub presence: Option<PresenceState>,
     #[serde(default)]
@@ -26,7 +25,11 @@ pub struct PersistedSession {
     pub project: String,
     pub config: SessionNotifyConfig,
     #[serde(default)]
-    pub editor_type: EditorType,
+    pub editor_type: Provider,
+    #[serde(default)]
+    pub status: SessionStatus,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// Encapsulates all storage operations for server state persistence.

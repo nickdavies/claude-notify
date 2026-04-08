@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 use super::AppState;
 use super::notifier::Notifier;
 use crate::error::AppError;
+use protocol::Secret;
 
 /// Concrete client type returned by `from_provider_metadata` + `set_redirect_uri`.
 type ProviderClient = CoreClient<
@@ -35,7 +36,7 @@ pub struct OidcProvider {
 /// Basic auth credentials for development/testing.
 pub struct BasicAuthCreds {
     pub user: String,
-    pub password: String,
+    pub password: Secret,
 }
 
 /// Manages all configured auth providers (OIDC + optional basic auth).
@@ -115,7 +116,10 @@ impl OAuthManager {
             (env::var("BASIC_AUTH_USER"), env::var("BASIC_AUTH_PASSWORD"))
         {
             warn!("Basic auth enabled — do NOT use in production");
-            Some(BasicAuthCreds { user, password })
+            Some(BasicAuthCreds {
+                user,
+                password: Secret::new(password),
+            })
         } else {
             None
         };
@@ -161,7 +165,7 @@ impl OAuthManager {
     pub fn check_basic_auth(&self, user: &str, password: &str) -> bool {
         self.basic_auth
             .as_ref()
-            .is_some_and(|c| c.user == user && c.password == password)
+            .is_some_and(|c| c.user == user && c.password.expose() == password)
     }
 }
 
