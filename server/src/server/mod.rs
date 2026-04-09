@@ -6,6 +6,7 @@ pub mod notifier;
 pub mod oauth;
 pub mod presence;
 pub mod pushover;
+pub mod questions;
 pub mod sessions;
 pub mod storage;
 pub mod web;
@@ -32,12 +33,13 @@ use hooks::PendingNotifications;
 use notifier::Notifier;
 use oauth::OAuthManager;
 use presence::{Presence, PresenceUpdate};
+use questions::QuestionRegistry;
 use sessions::{EffectiveSessionStatus, SessionConfigUpdate, SessionRegistry, SessionStatus};
 
 // Import protocol types used directly in this module's handlers.
 use protocol::{
     ApprovalDecision, ApprovalModeResponse, ApprovalResolveRequest, ApprovalWaitResponse,
-    ConfigResponse, SessionId,
+    ConfigResponse, QuestionDecision, QuestionResolveRequest, QuestionWaitResponse, SessionId,
 };
 
 pub struct AppState<N: Notifier> {
@@ -48,6 +50,7 @@ pub struct AppState<N: Notifier> {
     pub notify_config: SharedNotifyConfig,
     pub pending: Arc<PendingNotifications>,
     pub approvals: Arc<ApprovalRegistry>,
+    pub questions: Arc<QuestionRegistry>,
     pub oauth: Arc<Option<OAuthManager>>,
 }
 
@@ -61,6 +64,7 @@ impl<N: Notifier> Clone for AppState<N> {
             notify_config: Arc::clone(&self.notify_config),
             pending: Arc::clone(&self.pending),
             approvals: Arc::clone(&self.approvals),
+            questions: Arc::clone(&self.questions),
             oauth: Arc::clone(&self.oauth),
         }
     }
@@ -92,12 +96,20 @@ pub fn router<N: Notifier>(state: AppState<N>) -> Router {
     if state.config.approval_mode != ApprovalFeatureMode::Disabled {
         api_v1 = api_v1
             .route("/hooks/approval", post(hooks::approval::<N>))
+            .route("/hooks/question", post(hooks::question::<N>))
             .route("/approvals/pending", get(handle_list_pending::<N>))
             .route("/approvals/{id}", get(handle_get_approval::<N>))
             .route("/approvals/{id}/wait", get(handle_approval_wait::<N>))
             .route(
                 "/approvals/{id}/resolve",
                 post(handle_approval_resolve::<N>),
+            )
+            .route("/questions/pending", get(handle_list_questions::<N>))
+            .route("/questions/{id}", get(handle_get_question::<N>))
+            .route("/questions/{id}/wait", get(handle_question_wait::<N>))
+            .route(
+                "/questions/{id}/resolve",
+                post(handle_question_resolve::<N>),
             )
             .route(
                 "/sessions/{id}/approval-mode",
@@ -160,11 +172,12 @@ async fn health() -> &'static str {
 }
 
 /// Resolve the effective status for a session by combining its stored status
-/// with server-side knowledge (pending approvals).
+/// with server-side knowledge (pending approvals, pending questions).
 pub(crate) fn resolve_effective_status(
     stored: SessionStatus,
     waiting_reason: Option<&str>,
     pending_approval: Option<&approvals::Approval>,
+    pending_question: Option<&questions::PendingQuestion>,
 ) -> EffectiveSessionStatus {
     if stored == SessionStatus::Ended {
         return EffectiveSessionStatus::Ended;
@@ -182,6 +195,18 @@ pub(crate) fn resolve_effective_status(
             input_str
         };
         let reason = format!("Pending approval: {} — {}", approval.tool, truncated);
+        return EffectiveSessionStatus::Waiting {
+            reason: Some(reason),
+        };
+    }
+    // Pending questions are also waiting
+    if let Some(pq) = pending_question {
+        let header = pq
+            .questions
+            .first()
+            .map(|q| q.header.as_str())
+            .unwrap_or("question");
+        let reason = format!("Plan question: {header}");
         return EffectiveSessionStatus::Waiting {
             reason: Some(reason),
         };
@@ -214,10 +239,15 @@ async fn build_session_views<N: Notifier>(state: &AppState<N>) -> Vec<sessions::
             .approvals
             .first_pending_for_session(&s.session_id)
             .await;
+        let pending_q = state
+            .questions
+            .first_pending_for_session(&s.session_id)
+            .await;
         let status = resolve_effective_status(
             s.stored_status,
             s.waiting_reason.as_deref(),
             pending.as_ref(),
+            pending_q.as_ref(),
         );
         views.push(sessions::SessionView {
             session_id: s.session_id,
@@ -384,6 +414,89 @@ async fn handle_get_approval_mode<N: Notifier>(
     }))
 }
 
+// --- Question API handlers ---
+
+/// GET /api/v1/questions/pending — list all pending questions.
+async fn handle_list_questions<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+) -> Json<Vec<questions::PendingQuestion>> {
+    Json(state.questions.list_pending().await)
+}
+
+/// GET /api/v1/questions/{id} — get a single question by ID.
+async fn handle_get_question<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<Json<questions::PendingQuestion>, AppError> {
+    state
+        .questions
+        .get(id)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))
+        .map(Json)
+}
+
+/// GET /api/v1/questions/{id}/wait — long-poll for question answer (55s timeout).
+async fn handle_question_wait<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+) -> Result<(axum::http::StatusCode, Json<QuestionWaitResponse>), AppError> {
+    let mut rx = state
+        .questions
+        .subscribe(id)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))?;
+
+    state.questions.touch(id).await;
+
+    if rx.borrow().is_resolved() {
+        let status = rx.borrow().clone();
+        return Ok((
+            axum::http::StatusCode::OK,
+            Json(QuestionWaitResponse { status }),
+        ));
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(55), rx.changed()).await;
+
+    let status = rx.borrow().clone();
+    if result.is_ok() && status.is_resolved() {
+        Ok((
+            axum::http::StatusCode::OK,
+            Json(QuestionWaitResponse { status }),
+        ))
+    } else {
+        Ok((
+            axum::http::StatusCode::ACCEPTED,
+            Json(QuestionWaitResponse {
+                status: questions::QuestionStatus::Pending,
+            }),
+        ))
+    }
+}
+
+/// POST /api/v1/questions/{id}/resolve — answer/reject/cancel a question.
+async fn handle_question_resolve<N: Notifier>(
+    axum::extract::State(state): axum::extract::State<AppState<N>>,
+    axum::extract::Path(id): axum::extract::Path<Uuid>,
+    Json(req): Json<QuestionResolveRequest>,
+) -> Result<Json<questions::PendingQuestion>, AppError> {
+    let new_status = match req.decision {
+        QuestionDecision::Answer => questions::QuestionStatus::Answered {
+            answers: req.answers.unwrap_or_default(),
+        },
+        QuestionDecision::Reject => questions::QuestionStatus::Rejected { reason: req.reason },
+        QuestionDecision::Cancel => questions::QuestionStatus::Cancelled,
+    };
+
+    state
+        .questions
+        .resolve(id, new_status)
+        .await
+        .ok_or_else(|| AppError::QuestionNotFound(id.to_string()))
+        .map(Json)
+}
+
 impl<N: Notifier> AppState<N> {
     pub fn new(server_config: ServerConfig, notifier: N, oauth: Option<OAuthManager>) -> Self {
         let presence = Presence::new(server_config.presence_ttl_secs);
@@ -399,6 +512,7 @@ impl<N: Notifier> AppState<N> {
             notify_config: Arc::new(RwLock::new(notify_config)),
             pending: Arc::new(PendingNotifications::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
+            questions: Arc::new(QuestionRegistry::new()),
             oauth: Arc::new(oauth),
         }
     }
@@ -712,6 +826,155 @@ mod integration_tests {
         assert!(
             reason.contains("Pending approval"),
             "reason should mention pending approval, got: {reason}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Zombie Waiting session reset — sessions with no pending
+    // question or approval must be reset to Idle so TTL eviction can
+    // eventually clean them up.
+    // ---------------------------------------------------------------
+
+    /// A Waiting session that has a pending question must NOT be reset.
+    #[tokio::test]
+    async fn waiting_session_with_pending_question_is_not_reset() {
+        let app = test_app();
+
+        // Register a session and set it to Waiting.
+        post_json(
+            &app,
+            "/api/v1/hooks/status",
+            r#"{"session_id":"ses_q","cwd":"/tmp/proj","status":"active","editor_type":"opencode"}"#,
+        )
+        .await;
+
+        // Register a pending question via the hooks endpoint.
+        let (status, body) = {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/hooks/question")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{
+                        "id": "req-q1",
+                        "session_id": "ses_q",
+                        "session_display_name": "Test Session",
+                        "cwd": "/tmp/proj",
+                        "question_request_id": "oc-req-1",
+                        "questions": [{"question":"Continue?","header":"Plan","options":[{"label":"Yes","description":"Go ahead"},{"label":"No","description":"Stop"}]}],
+                        "provider": "opencode"
+                    }"#,
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            let s = resp.status();
+            let b = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (s, String::from_utf8(b.to_vec()).unwrap())
+        };
+        assert_eq!(
+            status,
+            AxumStatus::OK,
+            "question registration failed: {body}"
+        );
+
+        // Session should be Waiting due to the pending question.
+        let (_, body) = get_json(&app, "/api/v1/sessions").await;
+        let sessions: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        let sess = sessions
+            .iter()
+            .find(|s| s["session_id"] == "ses_q")
+            .unwrap();
+        assert_eq!(
+            sess["status"]["status"], "waiting",
+            "session should be Waiting while question is pending"
+        );
+    }
+
+    /// A Waiting session whose question has been resolved must be eligible for
+    /// zombie reset (first_pending_for_session returns None after resolve).
+    #[tokio::test]
+    async fn waiting_session_becomes_zombie_after_question_resolved() {
+        use protocol::QuestionInfo;
+        use questions::{QuestionRegistry, QuestionStatus, RegisterQuestion};
+
+        let reg = SessionRegistry::new(9999);
+        let questions = QuestionRegistry::new();
+
+        // Register session in Waiting state.
+        reg.get_or_register(&SessionId::new("ses_zombie"), "/tmp/z", None)
+            .await;
+        reg.set_status(
+            &SessionId::new("ses_zombie"),
+            SessionStatus::Waiting,
+            Some("pending question".to_string()),
+            None,
+        )
+        .await;
+
+        // Register a question for this session.
+        let q = questions
+            .register(RegisterQuestion {
+                request_id: "req-zombie-1".to_string(),
+                session_id: SessionId::new("ses_zombie"),
+                session_display_name: "Zombie Test".to_string(),
+                project: "z".to_string(),
+                question_request_id: "oc-1".to_string(),
+                questions: vec![QuestionInfo {
+                    question: "Proceed?".to_string(),
+                    header: "Plan".to_string(),
+                    options: vec![],
+                    multiple: None,
+                    custom: None,
+                }],
+                provider: "opencode".to_string(),
+            })
+            .await;
+
+        // While question is pending, first_pending_for_session returns Some.
+        assert!(
+            questions
+                .first_pending_for_session(&SessionId::new("ses_zombie"))
+                .await
+                .is_some(),
+            "should have a pending question"
+        );
+
+        // Simulate gateway cancel (e.g. SIGTERM path).
+        questions.resolve(q.id, QuestionStatus::Cancelled).await;
+
+        // Now no pending question remains — zombie condition.
+        assert!(
+            questions
+                .first_pending_for_session(&SessionId::new("ses_zombie"))
+                .await
+                .is_none(),
+            "no pending question after cancel"
+        );
+
+        // The zombie reset logic in main.rs would call set_status(Idle) here.
+        reg.set_status(
+            &SessionId::new("ses_zombie"),
+            SessionStatus::Idle,
+            None,
+            None,
+        )
+        .await;
+
+        let sessions = reg.list().await;
+        let sess = sessions
+            .iter()
+            .find(|s| s.session_id == SessionId::new("ses_zombie"))
+            .unwrap();
+        assert_eq!(
+            sess.stored_status,
+            SessionStatus::Idle,
+            "zombie session should be reset to Idle"
+        );
+        assert!(
+            sess.waiting_reason.is_none(),
+            "waiting_reason should be cleared after reset"
         );
     }
 }

@@ -12,13 +12,14 @@ use tracing::{info, warn};
 // Re-export protocol types used by this module.
 use protocol::SessionStatus;
 pub use protocol::{
-    ApprovalRequest, ApprovalResponse, NotificationPayload, SessionEndPayload, SessionId,
-    StatusReport, StopPayload,
+    ApprovalRequest, ApprovalResponse, NotificationPayload, QuestionProxyRequest,
+    QuestionProxyResponse, SessionEndPayload, SessionId, StatusReport, StopPayload,
 };
 
 use super::AppState;
 use super::approvals;
 use super::notifier::Notifier;
+use super::questions;
 use crate::server::presence::PresenceState;
 
 /// Tracks pending delayed notifications so they can be cancelled.
@@ -273,6 +274,42 @@ async fn fire_and_forget<N: Notifier>(notifier: &N, title: &str, message: &str, 
     if let Err(e) = notifier.send(title, message, url).await {
         warn!("{} notification failed: {e}", notifier.name());
     }
+}
+
+/// POST /api/v1/hooks/question — register a proxied question from the gateway.
+pub async fn question<N: Notifier>(
+    State(state): State<AppState<N>>,
+    Json(req): Json<QuestionProxyRequest>,
+) -> Json<QuestionProxyResponse> {
+    let project = state
+        .sessions
+        .get_or_register(&req.session_id, &req.cwd, None)
+        .await;
+
+    if !req.session_display_name.is_empty() {
+        state
+            .sessions
+            .set_display_name(&req.session_id, req.session_display_name.clone())
+            .await;
+    }
+
+    let pq = state
+        .questions
+        .register(questions::RegisterQuestion {
+            request_id: req.id,
+            session_id: req.session_id,
+            session_display_name: req.session_display_name,
+            project: project.clone(),
+            question_request_id: req.question_request_id,
+            questions: req.questions,
+            provider: req.provider,
+        })
+        .await;
+
+    Json(QuestionProxyResponse {
+        id: pq.id,
+        status: pq.status,
+    })
 }
 
 #[cfg(test)]

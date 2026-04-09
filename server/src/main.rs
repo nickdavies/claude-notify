@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use protocol::Secret;
+use protocol::{Secret, SessionStatus};
 use server::config::ApprovalFeatureMode;
 use server::notifier::{Notifier, NullNotifier};
 use server::oauth::OAuthManager;
@@ -166,6 +166,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
     // Spawn session eviction background task
     let sessions = Arc::clone(&state.sessions);
     let approvals = Arc::clone(&state.approvals);
+    let questions = Arc::clone(&state.questions);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -173,12 +174,45 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
             let evicted = sessions.evict_stale(Duration::from_secs(1800)).await;
             for session_id in &evicted {
                 approvals.evict_session(session_id).await;
+                questions.evict_session(session_id).await;
             }
             // Cancel approvals whose gateway has stopped polling (killed, crashed,
             // or lost connectivity). Threshold is 2× the 55s long-poll window.
             let orphaned = approvals.evict_orphaned(Duration::from_secs(120)).await;
             if orphaned > 0 {
                 info!(count = orphaned, "cancelled orphaned approvals");
+            }
+            let orphaned_q = questions.evict_orphaned(Duration::from_secs(120)).await;
+            if orphaned_q > 0 {
+                info!(count = orphaned_q, "cancelled orphaned questions");
+            }
+            // After orphaned eviction, any session still in Waiting state but with no
+            // pending question or approval is a zombie (agent died mid-question).
+            // Reset it to Idle so normal TTL eviction can clean it up.
+            let waiting_sessions = sessions
+                .list()
+                .await
+                .into_iter()
+                .filter(|s| s.stored_status == SessionStatus::Waiting)
+                .collect::<Vec<_>>();
+            for s in waiting_sessions {
+                let has_pending_approval = approvals
+                    .first_pending_for_session(&s.session_id)
+                    .await
+                    .is_some();
+                let has_pending_question = questions
+                    .first_pending_for_session(&s.session_id)
+                    .await
+                    .is_some();
+                if !has_pending_approval && !has_pending_question {
+                    info!(
+                        session_id = %s.session_id,
+                        "resetting zombie Waiting session to Idle"
+                    );
+                    sessions
+                        .set_status(&s.session_id, SessionStatus::Idle, None, None)
+                        .await;
+                }
             }
         }
     });

@@ -22,6 +22,18 @@
         tr.tool-preview.visible { display: table-row; }
         tr.tool-preview code { font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; color: var(--pico-muted-color); }
 
+        /* Question answer form */
+        .question-card { border: 1px solid var(--pico-muted-border-color); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+        .question-card h5 { margin: 0 0 0.25rem; font-size: 0.95rem; }
+        .question-card .q-header { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; color: var(--pico-muted-color); margin-bottom: 0.5rem; }
+        .question-card label { display: flex; align-items: flex-start; gap: 0.5rem; margin-bottom: 0.35rem; font-size: 0.9rem; cursor: pointer; }
+        .question-card label input { margin-top: 0.15rem; }
+        .question-card .q-description { font-size: 0.8rem; color: var(--pico-muted-color); margin-left: 1.5rem; }
+        .question-card .custom-input { margin-top: 0.5rem; display: none; }
+        .question-card .custom-input.visible { display: block; }
+        .question-actions { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+        .question-actions button { margin: 0; padding: 0.3rem 0.75rem; font-size: 0.85rem; }
+
         /* Session status badges */
         .status-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; line-height: 1.4; text-transform: capitalize; }
         .status-active { background: #16a34a22; color: #16a34a; }
@@ -88,6 +100,11 @@
         </tbody>
     </table>
     {% endif %}
+    </div>
+
+    <h3>Pending Questions</h3>
+    <div id="questions-container">
+    <p id="no-questions">No pending questions.</p>
     </div>
 
     <h3>Sessions</h3>
@@ -194,9 +211,10 @@
     // --- Polling ---
     async function poll() {
         try {
-            const [approvalsResp, sessionsResp] = await Promise.all([
+            const [approvalsResp, sessionsResp, questionsResp] = await Promise.all([
                 fetch('/api/v1/approvals/pending', { credentials: 'same-origin' }),
-                fetch('/api/v1/sessions', { credentials: 'same-origin' })
+                fetch('/api/v1/sessions', { credentials: 'same-origin' }),
+                fetch('/api/v1/questions/pending', { credentials: 'same-origin' })
             ]);
             if (approvalsResp.ok) {
                 const approvals = await approvalsResp.json();
@@ -205,6 +223,10 @@
             if (sessionsResp.ok) {
                 const sessions = await sessionsResp.json();
                 renderSessions(sessions);
+            }
+            if (questionsResp.ok) {
+                const questions = await questionsResp.json();
+                renderQuestions(questions);
             }
         } catch (e) {
             // silently ignore fetch errors
@@ -491,7 +513,116 @@
         poll();
     };
 
-    // --- Keyboard shortcuts ---
+    // --- Question helpers ---
+
+    window.toggleCustomInput = function(qid, qIdx, checked) {
+        const el = document.getElementById(`custom-${qid}-${qIdx}`);
+        if (el) el.classList.toggle('visible', checked);
+    };
+
+    function collectAnswers(qid, numQuestions) {
+        const answers = [];
+        for (let i = 0; i < numQuestions; i++) {
+            const selected = [];
+            const inputs = document.querySelectorAll(`input[name="q-${qid}-${i}"]`);
+            inputs.forEach(inp => {
+                if (inp.checked) {
+                    if (inp.value === '__custom__') {
+                        const custom = document.querySelector(`#custom-${qid}-${i} input`);
+                        if (custom && custom.value.trim()) selected.push(custom.value.trim());
+                    } else {
+                        selected.push(inp.value);
+                    }
+                }
+            });
+            answers.push(selected);
+        }
+        return answers;
+    }
+
+    window.submitQuestion = async function(qid, numQuestions) {
+        const answers = collectAnswers(qid, numQuestions);
+        await fetch(`/api/v1/questions/${qid}/resolve`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'answer', answers })
+        });
+        poll();
+    };
+
+    window.rejectQuestion = async function(qid) {
+        await fetch(`/api/v1/questions/${qid}/resolve`, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'reject' })
+        });
+        poll();
+    };
+
+    function renderQuestions(questions) {
+        const container = document.getElementById('questions-container');
+        if (questions.length === 0) {
+            container.innerHTML = '<p>No pending questions.</p>';
+            return;
+        }
+        const existingIds = new Set(
+            Array.from(container.querySelectorAll('[data-qid]')).map(el => el.dataset.qid)
+        );
+        const newIds = new Set(questions.map(q => q.id));
+
+        // Remove cards no longer pending
+        for (const id of existingIds) {
+            if (!newIds.has(id)) {
+                const el = document.getElementById('qcard-' + id);
+                if (el) el.remove();
+            }
+        }
+
+        // Add new cards
+        for (const pq of questions) {
+            if (existingIds.has(pq.id)) continue; // already shown
+            const card = document.createElement('div');
+            card.className = 'question-card';
+            card.id = 'qcard-' + pq.id;
+            card.dataset.qid = pq.id;
+            const time = new Date(pq.created_at).toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+            let html = `<p style="font-size:0.75rem;color:var(--pico-muted-color);margin:0 0 0.5rem">
+                <strong>${esc(pq.session_display_name)}</strong> · ${esc(pq.project)} · ${time}
+            </p>`;
+            pq.questions.forEach((q, qi) => {
+                const inputType = q.multiple ? 'checkbox' : 'radio';
+                html += `<div class="q-header">${esc(q.header)}</div><h5>${esc(q.question)}</h5>`;
+                q.options.forEach(opt => {
+                    html += `<label><input type="${inputType}" name="q-${pq.id}-${qi}" value="${esc(opt.label)}"> ${esc(opt.label)}</label>`;
+                    if (opt.description) {
+                        html += `<div class="q-description">${esc(opt.description)}</div>`;
+                    }
+                });
+                const custom = q.custom !== false;
+                if (custom) {
+                    html += `<label style="margin-top:0.5rem"><input type="${inputType}" name="q-${pq.id}-${qi}" value="__custom__" onchange="toggleCustomInput('${pq.id}',${qi},this.checked)"> Type your own answer</label>`;
+                    html += `<div class="custom-input" id="custom-${pq.id}-${qi}"><input type="text" placeholder="Your answer..." style="margin:0;padding:0.25rem 0.5rem;font-size:0.85rem"></div>`;
+                }
+            });
+            if (READWRITE) {
+                html += `<div class="question-actions">
+                    <button onclick="submitQuestion('${pq.id}',${pq.questions.length})">Submit Answer</button>
+                    <button class="outline secondary" onclick="rejectQuestion('${pq.id}')">Dismiss</button>
+                </div>`;
+            }
+            card.innerHTML = html;
+            container.appendChild(card);
+        }
+
+        // Ensure "no questions" placeholder is removed if we have cards
+        const placeholder = container.querySelector('p');
+        if (placeholder && questions.length > 0) placeholder.remove();
+    }
+
+    // Start polling
+    setInterval(poll, POLL_MS);
     document.addEventListener('keydown', function(e) {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
 

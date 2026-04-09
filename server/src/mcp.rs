@@ -116,6 +116,7 @@ impl NotifyMcp {
                 s.stored_status,
                 s.waiting_reason.as_deref(),
                 pending.as_ref(),
+                None, // MCP doesn't have question registry access
             );
             views.push(SessionView {
                 session_id: s.session_id,
