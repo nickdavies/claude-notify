@@ -1,0 +1,49 @@
+[workflow]
+id = "sample_reactive_exec"
+schema = "reactive_v2"
+initial_state = "bootstrap"
+
+[[workflow.states]]
+id = "bootstrap"
+kind = "auto"
+
+[[workflow.states.on]]
+event = "start"
+target = "implement"
+
+[[workflow.states]]
+id = "implement"
+kind = "command"
+executor = "raw"
+command = "sh"
+args = ["-lc", "echo '{\"implemented\":true}' > \"$AGENT_OUTPUT_PATH\""]
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "review"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "review"
+
+[[workflow.states]]
+id = "review"
+kind = "human"
+
+# Human gate can either approve to finish, or reject to loop back.
+[[workflow.states.on]]
+event = "human_approved"
+target = "done"
+
+[[workflow.states.on]]
+event = "human_changes_requested"
+target = "implement"
+
+[[workflow.states]]
+id = "done"
+kind = "terminal"
+
+# Manual progression at human state uses existing fire_event API:
+# POST /api/v1/orchestration/work-items/{id}/event
+# {"event":"human_approved"}           # approve
+# {"event":"human_changes_requested"}  # request another implementation loop

@@ -1,6 +1,7 @@
 mod client;
 mod review;
 mod validate;
+mod workflows;
 
 use clap::{Parser, Subcommand};
 
@@ -45,6 +46,12 @@ enum Commands {
         #[arg(long, env = "AGENT_HUB_TOKEN")]
         token: Option<String>,
     },
+    /// Validate orchestration workflow TOML definitions
+    ValidateWorkflows {
+        /// Directory containing workflow .toml files
+        #[arg(long, default_value = "workflows")]
+        dir: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,6 +69,10 @@ fn main() -> anyhow::Result<()> {
             token,
         } => {
             let code = rt.block_on(validate::run(config, server, token));
+            std::process::exit(code);
+        }
+        Commands::ValidateWorkflows { dir } => {
+            let code = workflows::run(dir);
             std::process::exit(code);
         }
     }

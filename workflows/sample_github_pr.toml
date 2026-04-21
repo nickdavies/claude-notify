@@ -1,0 +1,71 @@
+[workflow]
+id = "sample_github_pr"
+schema = "reactive_v2"
+initial_state = "create_or_discover_pr"
+
+[[workflow.states]]
+id = "create_or_discover_pr"
+kind = "command"
+executor = "raw"
+timeout_secs = 120
+command = "sh"
+args = [
+  "-lc",
+  "base_ref=\"${AGENT_BASE_REF#origin/}\";\nif [ -z \"$AGENT_REPO_SLUG\" ]; then echo 'repo is not GitHub or AGENT_REPO_SLUG missing' >&2; exit 1; fi;\npr_json=\"$(gh pr view --repo \"$AGENT_REPO_SLUG\" --head \"$AGENT_TARGET_BRANCH\" --json number,url,state,isDraft,headRefName,baseRefName --jq '{number:.number,url:.url,state:(.state|ascii_downcase),is_draft:.isDraft,head_ref_name:.headRefName,base_ref_name:.baseRefName}' 2>/dev/null || true)\";\nif [ -z \"$pr_json\" ]; then gh pr create --repo \"$AGENT_REPO_SLUG\" --head \"$AGENT_TARGET_BRANCH\" --base \"$base_ref\" --title \"agent-hub: $AGENT_TARGET_BRANCH\" --body \"Created by agent-hub workflow step\" >/dev/null; pr_json=\"$(gh pr view --repo \"$AGENT_REPO_SLUG\" --head \"$AGENT_TARGET_BRANCH\" --json number,url,state,isDraft,headRefName,baseRefName --jq '{number:.number,url:.url,state:(.state|ascii_downcase),is_draft:.isDraft,head_ref_name:.headRefName,base_ref_name:.baseRefName}')\"; fi;\nprintf '{\"github_pr\":%s}\n' \"$pr_json\" > \"$AGENT_OUTPUT_PATH\""
+]
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "await_merge"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "failed"
+
+[[workflow.states]]
+id = "await_merge"
+kind = "human"
+auto_merge = true
+
+[[workflow.states.on]]
+event = "pr_merged"
+target = "done"
+
+[[workflow.states]]
+id = "done"
+kind = "terminal"
+
+[[workflow.states]]
+id = "failed"
+kind = "terminal"
+terminal_outcome = "failed"
+
+# Expected repo-backed work item payload:
+# {
+#   "workflow_id": "sample_github_pr",
+#   "context": {},
+#   "repo": {
+#     "repo_url": "https://github.com/owner/repo.git",
+#     "base_ref": "origin/main",
+#     "branch_name": "agent-hub/my-branch"
+#   }
+# }
+#
+# Worker env contract for repo-backed steps:
+# - AGENT_REPO_URL: original repo URL from work item
+# - AGENT_BASE_REF: base ref from work item (e.g. origin/main)
+# - AGENT_TARGET_BRANCH: target branch for this work item
+# - AGENT_REPO_SLUG: owner/repo when repo URL is GitHub
+#
+# Structured output contract for PR metadata:
+# output.json should include:
+# {
+#   "github_pr": {
+#     "number": 123,
+#     "url": "https://github.com/owner/repo/pull/123",
+#     "state": "open",
+#     "is_draft": false,
+#     "head_ref_name": "agent-hub/my-branch",
+#     "base_ref_name": "main"
+#   }
+# }

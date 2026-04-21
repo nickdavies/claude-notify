@@ -1,4 +1,5 @@
 mod error;
+mod grpc;
 mod mcp;
 mod server;
 
@@ -129,6 +130,7 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
     let config =
         server::config::ServerConfig::from_env().context("failed to load server config")?;
     let listen_addr = config.listen_addr.clone();
+    let grpc_listen_addr = config.grpc_listen_addr.clone();
 
     // Initialize OAuth if approval mode requires it (skip when auth is disabled)
     let oauth = if config.approval_mode != ApprovalFeatureMode::Disabled
@@ -154,6 +156,11 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
     };
 
     let state = server::AppState::new(config, notifier, oauth);
+    state
+        .orchestration
+        .init()
+        .await
+        .context("failed to initialize orchestration storage")?;
 
     if let Some(persisted) = persisted {
         info!(
@@ -217,6 +224,41 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
         }
     });
 
+    // Spawn orchestration maintenance loop (faster cadence than session cleanup)
+    let orchestration_bg = Arc::clone(&state.orchestration);
+    let job_events_bg = Arc::clone(&state.job_events);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            match orchestration_bg.maintenance_tick().await {
+                Ok(stats) => {
+                    if stats.requeued_jobs > 0
+                        || stats.created_jobs > 0
+                        || stats.lease_requeued_jobs > 0
+                    {
+                        info!(
+                            requeued_jobs = stats.requeued_jobs,
+                            created_jobs = stats.created_jobs,
+                            lease_requeued_jobs = stats.lease_requeued_jobs,
+                            "orchestration maintenance tick"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("orchestration maintenance failed: {error}");
+                }
+            }
+            let cleaned = job_events_bg.cleanup_terminal_expired().await;
+            if cleaned > 0 {
+                tracing::debug!(
+                    count = cleaned,
+                    "cleaned expired terminal job event buffers"
+                );
+            }
+        }
+    });
+
     let app = server::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(&listen_addr)
@@ -224,6 +266,33 @@ async fn serve(notifier: impl Notifier, storage: impl Storage) -> anyhow::Result
         .context(format!("failed to bind {listen_addr}"))?;
 
     info!(addr = listen_addr, "server listening");
+
+    if let Some(grpc_addr) = grpc_listen_addr {
+        let orchestration = Arc::clone(&state.orchestration);
+        let job_events = Arc::clone(&state.job_events);
+        let grpc_config = Arc::clone(&state.config);
+        tokio::spawn(async move {
+            let addr = match grpc_addr.parse() {
+                Ok(addr) => addr,
+                Err(error) => {
+                    tracing::warn!("invalid GRPC_LISTEN_ADDR: {error}");
+                    return;
+                }
+            };
+            let svc = grpc::WorkerLifecycleGrpc::new(orchestration, job_events);
+            let interceptor = grpc::GrpcAuthInterceptor::new(grpc_config);
+            let server = tonic::transport::Server::builder().add_service(
+                grpc::pb::worker_lifecycle_server::WorkerLifecycleServer::with_interceptor(
+                    svc,
+                    interceptor,
+                ),
+            );
+            tracing::info!(addr = %addr, "gRPC worker service listening");
+            if let Err(error) = server.serve(addr).await {
+                tracing::warn!("gRPC server failed: {error}");
+            }
+        });
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

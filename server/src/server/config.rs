@@ -37,6 +37,16 @@ pub struct ServerConfig {
     pub approval_mode: ApprovalFeatureMode,
     pub base_url: Option<String>,
     pub default_approval_mode: SessionApprovalMode,
+    pub workflows_dir: String,
+    pub task_dir: String,
+    pub task_adapter: String,
+    pub vikunja_base_url: Option<String>,
+    pub vikunja_token: Option<String>,
+    pub vikunja_project_id: Option<i64>,
+    pub vikunja_label_prefix: Option<String>,
+    pub orchestration_db_path: String,
+    pub grpc_listen_addr: Option<String>,
+    pub github_webhook_secret: Option<String>,
 }
 
 pub struct Token {
@@ -115,6 +125,33 @@ impl ServerConfig {
             approval_mode,
             base_url,
             default_approval_mode,
+            workflows_dir: env::var("WORKFLOWS_DIR").unwrap_or_else(|_| "workflows".into()),
+            task_dir: env::var("TASK_DIR").unwrap_or_else(|_| "tasks".into()),
+            task_adapter: env::var("TASK_ADAPTER").unwrap_or_else(|_| "file".into()),
+            vikunja_base_url: env::var("VIKUNJA_BASE_URL").ok(),
+            vikunja_token: env::var("VIKUNJA_TOKEN").ok(),
+            vikunja_project_id: env::var("VIKUNJA_PROJECT_ID")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            vikunja_label_prefix: env::var("VIKUNJA_LABEL_PREFIX").ok(),
+            orchestration_db_path: env::var("ORCHESTRATION_DB")
+                .unwrap_or_else(|_| "orchestration.sqlite3".into()),
+            grpc_listen_addr: env::var("GRPC_LISTEN_ADDR").ok().and_then(|v| {
+                let trimmed = v.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }),
+            github_webhook_secret: env::var("GITHUB_WEBHOOK_SECRET").ok().and_then(|v| {
+                let trimmed = v.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            }),
         })
     }
 }

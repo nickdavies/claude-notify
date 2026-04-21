@@ -1,0 +1,10 @@
+[workflow]
+id = "sample_child_unit"
+entry_step = "child_task"
+
+[[workflow.steps]]
+id = "child_task"
+kind = "agent"
+executor = "raw"
+command = "sh"
+args = ["-lc", "echo '{\"child\":\"ok\"}' > \"$AGENT_OUTPUT_PATH\""]

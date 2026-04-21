@@ -1,0 +1,32 @@
+[workflow]
+id = "sample_managed_exec"
+schema = "reactive_v2"
+initial_state = "run_managed"
+
+[[workflow.states]]
+id = "run_managed"
+kind = "managed"
+operation = "default-agent"
+executor = "docker"
+environment_tier = "docker"
+network_resources = { resources = ["llm"] }
+
+[workflow.states.prompt]
+user = "Reply by writing a short success summary to the output file and set next_event to 'job_succeeded'."
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "done"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "failed"
+
+[[workflow.states]]
+id = "done"
+kind = "terminal"
+
+[[workflow.states]]
+id = "failed"
+kind = "terminal"
+terminal_outcome = "failed"

@@ -1,0 +1,51 @@
+[workflow]
+id = "sample_local_exec"
+entry_step = "prepare"
+
+[[workflow.steps]]
+id = "prepare"
+executor = "raw"
+timeout_secs = 30
+max_retries = 1
+command = "sh"
+args = ["-lc", "echo '{\"message\":\"hello from raw\",\"step\":\"prepare\",\"task\":\"{{task}}\"}' > \"$AGENT_OUTPUT_PATH\" && printf 'prepared\n' > prepare.log"]
+on_success = "container_step"
+
+[[workflow.steps]]
+id = "container_step"
+executor = "docker"
+container_image = "alpine:3.20"
+timeout_secs = 45
+command = "sh"
+args = ["-lc", "echo '{\"message\":\"hello from docker\",\"step\":\"container_step\",\"consumed_prepare\":true}' > /transcript/output.json && printf 'container step\n' > /workspace/container.log"]
+
+[workflow.steps.env]
+TASK_ID = "{{task}}"
+
+# Example POST /api/v1/orchestration/work-items payload for real repo/worktree mode:
+# {
+#   "workflow_id": "sample_local_exec",
+#   "context": {"task": "demo"},
+#   "repo": {
+#     "repo_url": "https://github.com/owner/repo.git",
+#     "base_ref": "origin/main",
+#     "branch_name": "agent-hub/sample-local-exec"
+#   }
+# }
+#
+# Context propagation contract (per finished step):
+# - context.job_outputs[step_id] = parsed output.json (or null)
+# - context.job_results[step_id] = typed result envelope
+#
+# Interpolation contract:
+# - {{path.to.value}} in step args/env is resolved from work item context
+#
+# Repo-backed worker env contract (when work item includes repo):
+# - AGENT_REPO_URL
+# - AGENT_BASE_REF
+# - AGENT_TARGET_BRANCH
+# - AGENT_REPO_SLUG (GitHub owner/repo when repo_url is github.com)
+#
+# GitHub PR metadata contract:
+# - Step may write {"github_pr": {...}} in output.json.
+# - local-agent will parse this and populate job_result.github_pr.

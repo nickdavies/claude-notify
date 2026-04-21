@@ -1,0 +1,257 @@
+[workflow]
+id = "simple-code-change"
+schema = "reactive_v2"
+initial_state = "triage_investigation"
+
+[[workflow.states]]
+id = "triage_investigation"
+kind = "agent"
+executor = "docker"
+environment_tier = "docker"
+network_resources = { resources = ["llm"] }
+
+[workflow.states.prompt]
+system = "You are a senior software engineer performing triage investigation on a task. Your job is to analyze the task, understand the codebase context, and produce a clear proposal for how to fix/implement the change. Be specific about which files to change and what approach to take."
+user = """
+Investigate the following task and produce a triage proposal.
+
+Task: {{title}}
+
+Description:
+{{description}}
+
+Analyze the codebase, identify the relevant files, and write a clear proposal for how to implement this change. Write your proposal to the output file.
+
+Also identify the repository and base branch needed for implementation.
+Candidate repositories for this task are mounted read-only under /repos/<repo-name>; inspect those mounts directly during triage.
+Candidate repositories for this task are provided below:
+{{repo_catalog_hint}}
+
+When you know them, include a `repo` object in output.json with this shape:
+{
+  "repo": {
+    "repo_url": "https://github.com/org/repo",
+    "base_ref": "origin/main",
+    "branch_name": "optional-feature-branch"
+  }
+}
+
+If you cannot identify a concrete repository URL from the provided catalog/context, do NOT invent one.
+In that case, set next_event to 'job_failed' and clearly explain what context is missing.
+
+Your proposal should include:
+1. Root cause analysis (if bug fix) or scope analysis (if feature/refactor)
+2. Files that need to change
+3. Proposed approach
+4. Risks or concerns
+
+Set next_event to 'job_succeeded' only when you provide a valid concrete repo.
+"""
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "await_triage_approval"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "triage_failed"
+
+[[workflow.states]]
+id = "triage_failed"
+kind = "human"
+
+[[workflow.states.on]]
+event = "human_changes_requested"
+target = "triage_investigation"
+
+[[workflow.states]]
+id = "await_triage_approval"
+kind = "human"
+
+[[workflow.states.on]]
+event = "human_approved"
+target = "implement"
+
+[[workflow.states.on]]
+event = "human_changes_requested"
+target = "triage_investigation"
+
+[[workflow.states]]
+id = "implement"
+kind = "agent"
+executor = "docker"
+environment_tier = "docker"
+network_resources = { resources = ["llm"] }
+
+[workflow.states.prompt]
+system = "You are a senior software engineer implementing a code change. Follow the approved triage proposal. Write clean, well-tested code. Commit your changes when done."
+user = """
+Implement the following task.
+
+Task: {{title}}
+
+Description:
+{{description}}
+
+Repository: {{repo}}
+Branch: {{branch}}
+
+Implement the change, write tests, and commit. Set next_event to 'job_succeeded' when done, or 'job_failed' if you cannot complete the implementation.
+"""
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "ai_review"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "implement"
+
+[[workflow.states]]
+id = "ai_review"
+kind = "agent"
+executor = "docker"
+environment_tier = "docker"
+network_resources = { resources = ["llm"] }
+
+[workflow.states.prompt]
+system = "You are a senior code reviewer performing automated review of a code change. Review the git diff for correctness, style, test coverage, and potential issues. Be thorough but fair."
+user = """
+Review the code changes on the current branch.
+
+Task: {{title}}
+
+Description:
+{{description}}
+
+Run 'git diff origin/main...HEAD' to see the changes. Review for:
+1. Correctness
+2. Test coverage
+3. Code style and clarity
+4. Potential bugs or edge cases
+
+If the changes look good, set next_event to 'job_succeeded'.
+If changes are needed, set next_event to 'job_failed' and explain what needs to be fixed in your summary.
+"""
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "push_to_remote"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "implement"
+
+[[workflow.states]]
+id = "push_to_remote"
+kind = "command"
+executor = "raw"
+command = "sh"
+args = [
+  "-c",
+  "git push origin HEAD 2>&1 && echo '{\"status\":\"completed\",\"next_event\":\"job_succeeded\",\"summary\":\"Pushed to remote\"}' > \"$AGENT_OUTPUT_PATH\" || echo '{\"status\":\"failed\",\"next_event\":\"job_failed\",\"summary\":\"Push failed\"}' > \"$AGENT_OUTPUT_PATH\""
+]
+environment_tier = "raw"
+network_resources = "full"
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "open_draft_pr"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "push_to_remote"
+
+[[workflow.states]]
+id = "open_draft_pr"
+kind = "command"
+executor = "docker"
+container_image = "local/opencode:agent-hub-proof"
+command = "sh"
+args = [
+  "-c",
+  "existing=$(gh pr view --json url,number 2>/dev/null || true); if echo \"$existing\" | grep -q '\"url\"'; then pr_url=$(echo \"$existing\" | jq -r .url); pr_num=$(echo \"$existing\" | jq -r .number); echo '{\"status\":\"completed\",\"next_event\":\"job_succeeded\",\"summary\":\"PR already exists\",\"github_pr\":{\"url\":\"'$pr_url'\",\"number\":'$pr_num'}}' > \"$AGENT_OUTPUT_PATH\"; else url=$(gh pr create --draft --title \"{{title}}\" --body \"Automated PR for: {{description}}\" --head \"$(git branch --show-current)\" 2>&1); if [ $? -eq 0 ]; then pr_num=$(gh pr view --json number -q .number 2>/dev/null || echo 0); echo '{\"status\":\"completed\",\"next_event\":\"job_succeeded\",\"summary\":\"Draft PR created\",\"github_pr\":{\"url\":\"'$url'\",\"number\":'$pr_num'}}' > \"$AGENT_OUTPUT_PATH\"; else echo '{\"status\":\"failed\",\"next_event\":\"job_failed\",\"summary\":\"Failed to create PR\"}' > \"$AGENT_OUTPUT_PATH\"; fi; fi"
+]
+environment_tier = "docker"
+network_resources = { resources = ["github"] }
+toolchains = ["gh"]
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "await_ci"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "open_draft_pr"
+
+[[workflow.states]]
+id = "await_ci"
+kind = "human"
+
+[[workflow.states.on]]
+event = "checks_passed"
+target = "request_owner_review"
+
+[[workflow.states.on]]
+event = "checks_failed"
+target = "implement"
+
+[[workflow.states]]
+id = "request_owner_review"
+kind = "command"
+executor = "docker"
+container_image = "local/opencode:agent-hub-proof"
+command = "sh"
+args = [
+  "-c",
+  "pr_url=$(gh pr view --json url -q .url 2>/dev/null || true); if [ -n \"$pr_url\" ]; then gh pr ready \"$pr_url\" 2>/dev/null; echo '{\"status\":\"completed\",\"next_event\":\"job_succeeded\",\"summary\":\"PR marked ready for review\"}' > \"$AGENT_OUTPUT_PATH\"; else echo '{\"status\":\"failed\",\"next_event\":\"job_failed\",\"summary\":\"No PR found\"}' > \"$AGENT_OUTPUT_PATH\"; fi"
+]
+environment_tier = "docker"
+network_resources = { resources = ["github"] }
+toolchains = ["gh"]
+
+[[workflow.states.on]]
+event = "job_succeeded"
+target = "await_owner_review"
+
+[[workflow.states.on]]
+event = "job_failed"
+target = "request_owner_review"
+
+[[workflow.states]]
+id = "await_owner_review"
+kind = "human"
+
+[[workflow.states.on]]
+event = "pr_approved"
+target = "merge"
+
+[[workflow.states.on]]
+event = "human_changes_requested"
+target = "implement"
+
+[[workflow.states.on]]
+event = "pr_merged"
+target = "done"
+
+[[workflow.states]]
+id = "merge"
+kind = "auto"
+auto_merge = true
+
+[[workflow.states.on]]
+event = "start"
+target = "await_merge_completion"
+
+[[workflow.states]]
+id = "await_merge_completion"
+kind = "human"
+auto_merge = true
+
+[[workflow.states.on]]
+event = "pr_merged"
+target = "done"
+
+[[workflow.states]]
+id = "done"
+kind = "terminal"

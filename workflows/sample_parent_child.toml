@@ -1,0 +1,19 @@
+[workflow]
+id = "sample_parent_child"
+entry_step = "run_child"
+
+[[workflow.steps]]
+id = "run_child"
+kind = "child_workflow"
+executor = "raw"
+child_workflow_id = "sample_child_unit"
+command = ""
+on_success = "finalize"
+on_failure = "finalize"
+
+[[workflow.steps]]
+id = "finalize"
+kind = "agent"
+executor = "raw"
+command = "sh"
+args = ["-lc", "echo '{\"final\":true}' > \"$AGENT_OUTPUT_PATH\""]
